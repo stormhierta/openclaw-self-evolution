@@ -152,7 +152,7 @@ export class OutcomeLabeler {
   }
 
   /**
-   * Get unlabeled turns from DB (reward_signal IS NULL or = 0.5 default).
+   * Get unlabeled turns from DB (reward_signal IS NULL).
    * 
    * @param skillName - Optional skill name to filter by
    * @param limit - Maximum number of turns to return (default 20)

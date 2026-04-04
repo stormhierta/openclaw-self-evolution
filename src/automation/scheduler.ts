@@ -103,6 +103,21 @@ export class EvolutionScheduler {
     };
   }
 
+  /**
+   * Parse a simple minute-based cron expression (e.g., "* /30 * * * *") to milliseconds.
+   * Falls back to 30 minutes if the cron is complex or invalid.
+   * Note: space in "* /" is to avoid closing the comment.
+   */
+  private parseIntervalFromCron(cron: string): number {
+    // Handle simple "*/N * * * *" pattern (every N minutes)
+    // Regex: ^\*\/(\d+)\s+\*\s+\*\s+\*\s+\*$
+    const match = cron.match(/^\*\/(\d+)\s+\*\s+\*\s+\*\s+\*$/);
+    if (match) {
+      return parseInt(match[1], 10) * 60 * 1000;
+    }
+    return 30 * 60 * 1000; // default 30 min
+  }
+
   // ==========================================================================
   // Public API
   // ==========================================================================
@@ -119,6 +134,10 @@ export class EvolutionScheduler {
         ...schedulerConfig,
       };
     }
+    
+    // Use cron config to determine interval if not explicitly provided
+    const cronInterval = this.parseIntervalFromCron(this.config.evolution.schedule?.cron ?? "*/30 * * * *");
+    this.schedulerConfig.intervalMs = schedulerConfig?.intervalMs ?? cronInterval;
     
     // Don't start if not enabled
     if (!this.schedulerConfig.enabled) {
@@ -216,10 +235,13 @@ export class EvolutionScheduler {
       // Step 5: Trigger evolution for each skill
       for (const decision of skillsToEvolve) {
         try {
-          const runId = await this.triggerEvolution(decision);
-          if (runId) {
+          const evolutionResult = await this.triggerEvolution(decision);
+          if (evolutionResult) {
             result.skillsTriggered.push(decision.skillName);
-            result.evolutionRunIds.push(runId);
+            result.evolutionRunIds.push(evolutionResult.runId);
+            if (evolutionResult.prId) {
+              result.prIds.push(evolutionResult.prId);
+            }
             
             // Update last run info for this skill
             this.lastRunInfo.set(decision.skillName, {
@@ -311,7 +333,7 @@ export class EvolutionScheduler {
    * 
    * Note: We create a fresh optimizer per evolution run to avoid shared state issues.
    */
-  private async triggerEvolution(decision: TriggerDecision): Promise<string | null> {
+  private async triggerEvolution(decision: TriggerDecision): Promise<{ runId: string; prId?: string } | null> {
     const skillName = decision.skillName;
     const skillPath = this.resolveSkillPath(skillName);
 
@@ -381,10 +403,10 @@ export class EvolutionScheduler {
       if (run.status === "completed" && run.bestVariant) {
         const pr = await this.prBuilder.buildPr(run, run.bestVariant.content);
         console.log(`[evolution-scheduler] PR created for ${skillName}: ${pr.id}`);
-        return run.id;
+        return { runId: run.id, prId: pr.id };
       }
 
-      return run.id;
+      return { runId: run.id };
     } catch (err) {
       console.error(`[evolution-scheduler] Evolution failed for ${skillName}:`, err);
       throw err;

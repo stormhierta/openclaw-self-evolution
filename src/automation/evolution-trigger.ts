@@ -299,13 +299,16 @@ export class EvolutionTrigger {
     }
 
     // Criterion 3: Long-term underperformer (> 50 turns, < 0.7 success rate)
+    // Use a longer window (90 days) for "long-term" check
+    const longTermStats = await this.getSkillPerformance(skillName, 90);
     if (
       !shouldEvolve &&
-      performance.totalTurns >= this.LONG_TERM_MIN_TURNS &&
-      performance.successRate < this.LONG_TERM_SUCCESS_THRESHOLD
+      longTermStats &&
+      longTermStats.totalTurns >= this.LONG_TERM_MIN_TURNS &&
+      longTermStats.successRate < this.LONG_TERM_SUCCESS_THRESHOLD
     ) {
       shouldEvolve = true;
-      reason = `Long-term underperformer: ${performance.totalTurns} turns with ${(performance.successRate * 100).toFixed(1)}% success rate (threshold: ${(this.LONG_TERM_SUCCESS_THRESHOLD * 100).toFixed(0)}%)`;
+      reason = `Long-term underperformer: ${longTermStats.totalTurns} turns with ${(longTermStats.successRate * 100).toFixed(1)}% success rate (threshold: ${(this.LONG_TERM_SUCCESS_THRESHOLD * 100).toFixed(0)}%)`;
       urgency = "medium";
     }
 
