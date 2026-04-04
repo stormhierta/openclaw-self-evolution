@@ -427,7 +427,7 @@ export class GEPAEvolver {
       candidates: candidateData,
       testCases: testCases.map((tc) => ({
         input: tc.input,
-        expectedOutput: tc.expectedOutput,
+        expectedOutput: tc.metadata?.expectedBehavior ?? tc.expectedOutput, // prefer richer rubric
         context: tc.context,
       })),
       config: {
@@ -452,6 +452,15 @@ export class GEPAEvolver {
       parents: candidates.map((c) => c.id),
       createdAt: new Date(),
     };
+
+    // Validate DSPy output before accepting
+    if (this.constraintValidator) {
+      const check = this.constraintValidator.validateVariant(dspyVariant, candidates[0]?.content ?? "");
+      if (!check.valid) {
+        console.warn("[evolver] DSPy output failed constraint validation, using genetic result");
+        return null; // caller uses fallback
+      }
+    }
 
     return {
       success: true,
@@ -700,6 +709,33 @@ export class GEPAEvolver {
     // Final scoring of all variants
     const finalScored = await this.scorePopulation(population, testCases);
     totalVariantsEvaluated += finalScored.length;
+
+    // Guard: if population or finalScored is empty, return baseline
+    if (population.length === 0 || finalScored.length === 0) {
+      // Return baseline variant as result
+      const baselineVariant: SkillVariant = {
+        id: `${skillName}-baseline`,
+        skillName,
+        generation: 0,
+        content: skillContent,
+        mutations: [],
+        parents: [],
+        createdAt: new Date(),
+      };
+      return {
+        bestVariant: baselineVariant,
+        bestScore: baselineScore,
+        baselineScore,
+        improvement: 0,
+        stoppedEarly: true,
+        stopReason: "no_improvement",
+        generationsCompleted: generationHistory.length,
+        totalVariantsEvaluated: 0,
+        generationHistory,
+        status: "completed",
+        completedAt: new Date(),
+      };
+    }
 
     // Select the best overall variant
     const best = this.selectBest(

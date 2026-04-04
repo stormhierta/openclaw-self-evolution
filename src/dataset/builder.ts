@@ -23,6 +23,8 @@ import type { SyntheticGenerator } from "./synthetic-generator.js";
 import type { GoldenSetLoader } from "./golden-sets.js";
 import { ExternalSessionImporter, type ImportSource } from "./external-importers/orchestrator.js";
 import { SessionMiner } from "../collection/session-miner.js";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * Options for building a dataset for a skill.
@@ -226,12 +228,20 @@ export class DatasetBuilder {
         const externalSources = options.externalSources ?? ["claude-code", "copilot", "openclaw"];
         const maxExternalExamples = options.maxExternalExamples ?? 50;
 
-        // Read skill content for relevance filtering
-        const skillContent = skillDescription; // Use description as skill content for now
+        // Load actual skill content for relevance filtering
+        let skillFileContent = skillDescription; // fallback to description
+        const skillPath = join(process.env.HOME ?? ".", ".openclaw", "skills", skillName, "SKILL.md");
+        if (existsSync(skillPath)) {
+          try {
+            skillFileContent = readFileSync(skillPath, "utf-8");
+          } catch {
+            // fallback to description
+          }
+        }
 
         const externalEntries = await importer.importForSkill(
           skillName,
-          skillContent,
+          skillFileContent, // use full skill content, not just description
           externalSources,
           maxExternalExamples
         );
