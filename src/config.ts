@@ -34,6 +34,10 @@ export const EvolutionEngineConfigSchema = z.object({
   schedule: z.object({
     cron: z.string().default("0 2 * * *"),
   }).strict().default({}),
+  // G3: DSPy as primary optimizer (hybrid architecture)
+  useDspyPrimary: z.boolean().default(false),
+  preWarmGenerations: z.number().int().min(0).default(2),
+  dspyIterations: z.number().int().min(1).default(10),
 }).strict();
 
 /**

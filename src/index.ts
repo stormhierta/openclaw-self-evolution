@@ -618,8 +618,8 @@ function createDatasetBuildTool(config: EvolutionConfig): AnyAgentTool {
         },
         datasetType: {
           type: "string",
-          description: "Type of dataset: synthetic|mined|golden|all",
-          enum: ["synthetic", "mined", "golden", "all"],
+          description: "Type of dataset: synthetic|mined|golden|external|all",
+          enum: ["synthetic", "mined", "golden", "external", "all"],
         },
         maxEntries: {
           type: "number",
@@ -685,20 +685,25 @@ function createDatasetBuildTool(config: EvolutionConfig): AnyAgentTool {
           });
         }
 
-        // datasetType filtering is not yet supported by DatasetBuilder.
-        // Return a structured error until type-specific filtering is implemented.
-        if (datasetType !== "all") {
+        // datasetType filtering is not yet supported by DatasetBuilder for synthetic/mined/golden.
+        // "all" and "external" are supported (external enables external session import).
+        if (datasetType !== "all" && datasetType !== "external") {
           return jsonResult({
             success: false,
-            error: `datasetType "${datasetType}" is not yet supported. Only "all" is currently implemented. Type-specific filtering is a planned enhancement.`,
+            error: `datasetType "${datasetType}" is not yet supported. Only "all" and "external" are currently implemented. Type-specific filtering is a planned enhancement.`,
             datasetId: null,
           });
         }
-        const buildOptions: { maxSynthetic?: number; maxMined?: number } = {};
+        const buildOptions: { maxSynthetic?: number; maxMined?: number; includeExternalSessions?: boolean; maxExternalExamples?: number } = {};
         if (maxEntries !== undefined) {
           // Distribute maxEntries across sources (all sources get the same limit for now)
           buildOptions.maxSynthetic = maxEntries;
           buildOptions.maxMined = maxEntries;
+        }
+        // Enable external session import when datasetType is "all" or "external"
+        if (datasetType === "all" || datasetType === "external") {
+          buildOptions.includeExternalSessions = true;
+          buildOptions.maxExternalExamples = maxEntries ?? 50;
         }
 
         const syntheticGenerator = new SyntheticGenerator(config);

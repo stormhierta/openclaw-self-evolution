@@ -17,6 +17,7 @@
 import type {
   EvolutionConfig,
   DatasetEntry,
+  DatasetEntryMetadata,
   TurnRecordRow,
   TimeRangeRow,
 } from "../types.js";
@@ -146,7 +147,17 @@ export class DatasetSessionMiner {
         contextData = {};
       }
 
+      // Determine difficulty based on input length heuristic
+      const difficulty = this.assessDifficulty(turn.user_message);
+
       // Build the dataset entry
+      const metadata: DatasetEntryMetadata = {
+        source: 'openclaw',
+        difficulty,
+        outcomeType: turn.outcome_type,
+        rewardSignal: turn.reward_signal,
+      };
+
       const entry: DatasetEntry = {
         id: `${turn.id}_dataset`,
         datasetId: "mined", // Will be set when added to a dataset
@@ -161,12 +172,7 @@ export class DatasetSessionMiner {
           ...contextData,
         },
         score: this.scoreEntryFromTurn(turn),
-        metadata: {
-          minedAt: new Date().toISOString(),
-          source: "session_miner",
-          outcomeType: turn.outcome_type,
-          rewardSignal: turn.reward_signal,
-        },
+        metadata,
         createdAt: new Date(turn.timestamp),
       };
 
@@ -240,6 +246,11 @@ export class DatasetSessionMiner {
         skillsUsed = [];
       }
 
+      const metadata: DatasetEntryMetadata = {
+        source: 'openclaw',
+        difficulty: this.assessDifficulty(turn.user_message),
+      };
+
       const entry: DatasetEntry = {
         id: `${turn.id}_toolcall`,
         datasetId: "mined",
@@ -256,11 +267,7 @@ export class DatasetSessionMiner {
           skillsUsed,
         },
         score: this.scoreEntryFromTurn(turn),
-        metadata: {
-          minedAt: new Date().toISOString(),
-          source: "tool_call_miner",
-          toolCallId: actionData.toolCallId,
-        },
+        metadata,
         createdAt: new Date(turn.timestamp),
       };
 
@@ -326,6 +333,12 @@ export class DatasetSessionMiner {
         skillsUsed = [];
       }
 
+      const metadata: DatasetEntryMetadata = {
+        source: 'openclaw',
+        difficulty: this.assessDifficulty(turn.user_message),
+        outcomeType: turn.outcome_type,
+      };
+
       const entry: DatasetEntry = {
         id: `${turn.id}_conversation`,
         datasetId: "mined",
@@ -344,11 +357,7 @@ export class DatasetSessionMiner {
           provider: outcomeData.provider,
         },
         score: this.scoreEntryFromTurn(turn),
-        metadata: {
-          minedAt: new Date().toISOString(),
-          source: "conversation_miner",
-          outcomeType: turn.outcome_type,
-        },
+        metadata,
         createdAt: new Date(turn.timestamp),
       };
 
@@ -431,6 +440,27 @@ export class DatasetSessionMiner {
 
     // For responses, use the text preview or full outcome
     return (outcomeData.textPreview as string) ?? JSON.stringify(outcomeData);
+  }
+
+  /**
+   * Assess difficulty level based on input length heuristic.
+   *
+   * - Short (< 100 chars) → easy
+   * - Long (> 500 chars) → hard
+   * - Medium (100-500 chars) → medium
+   *
+   * @param input - The user input message
+   * @returns Difficulty level: 'easy', 'medium', or 'hard'
+   */
+  private assessDifficulty(input: string): 'easy' | 'medium' | 'hard' {
+    const length = input.length;
+    if (length < 100) {
+      return 'easy';
+    }
+    if (length > 500) {
+      return 'hard';
+    }
+    return 'medium';
   }
 
   /**

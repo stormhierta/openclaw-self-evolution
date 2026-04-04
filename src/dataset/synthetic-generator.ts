@@ -9,7 +9,7 @@
  * - Direct MiniMax API calls via fetch (no OpenClaw provider import per requirements)
  */
 
-import type { DatasetEntry, EvolutionConfig } from "../types.js";
+import type { DatasetEntry, DatasetEntryMetadata, EvolutionConfig } from "../types.js";
 
 /**
  * Response structure from MiniMax API
@@ -155,6 +155,9 @@ Skill Description: ${skillDescription}
 For each test case, provide:
 1. An input query that a user might send to this skill
 2. The expected output that the skill should produce
+3. A behavioral rubric describing what the agent should do (not exact text)
+4. Difficulty level (easy, medium, or hard)
+5. Category describing what aspect of the skill this tests
 
 Make the test cases diverse in:
 - Complexity (simple to complex)
@@ -167,6 +170,9 @@ Return ONLY a JSON array with this exact structure:
   {
     "input": "user query here",
     "expected_output": "expected skill response here",
+    "expected_behavior": "rubric: the agent should ... (behavioral description, not exact text)",
+    "difficulty": "easy|medium|hard",
+    "category": "what aspect of the skill this tests",
     "context": { "optional": "context object" }
   },
   ...
@@ -263,35 +269,40 @@ Do not include any explanation or markdown formatting, only the JSON array.`;
    */
   private parseGenerationResponse(response: string, skillName: string): DatasetEntry[] {
     const entries: DatasetEntry[] = [];
-    
+
     try {
       // Extract JSON from response (handle markdown code blocks)
-      const jsonMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/) || 
+      const jsonMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/) ||
                         response.match(/(\[[\s\S]*\])/);
       const jsonStr = jsonMatch ? jsonMatch[1] : response;
-      
+
       const parsed = JSON.parse(jsonStr.trim()) as Array<{
         input: string;
         expected_output: string;
+        expected_behavior?: string;
+        difficulty?: 'easy' | 'medium' | 'hard';
+        category?: string;
         context?: Record<string, unknown>;
       }>;
-      
+
       const now = new Date();
       const datasetId = `synthetic-${skillName}-${Date.now()}`;
-      
+
       for (let i = 0; i < parsed.length; i++) {
         const item = parsed[i];
+        const metadata: DatasetEntryMetadata = {
+          source: 'synthetic',
+          difficulty: item.difficulty,
+          category: item.category,
+          expectedBehavior: item.expected_behavior,
+        };
         entries.push({
           id: `synth-${skillName}-${Date.now()}-${i}`,
           datasetId,
           input: item.input,
           expectedOutput: item.expected_output,
           context: item.context,
-          metadata: {
-            source: "synthetic",
-            skillName,
-            generatedAt: now.toISOString(),
-          },
+          metadata,
           createdAt: now,
         });
       }
@@ -299,7 +310,7 @@ Do not include any explanation or markdown formatting, only the JSON array.`;
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to parse generation response: ${message}`);
     }
-    
+
     return entries;
   }
 
@@ -308,34 +319,35 @@ Do not include any explanation or markdown formatting, only the JSON array.`;
    */
   private parseVariantResponse(response: string, baseEntry: DatasetEntry): DatasetEntry[] {
     const entries: DatasetEntry[] = [];
-    
+
     try {
       // Extract JSON from response (handle markdown code blocks)
-      const jsonMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/) || 
+      const jsonMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/) ||
                         response.match(/(\[[\s\S]*\])/);
       const jsonStr = jsonMatch ? jsonMatch[1] : response;
-      
+
       const parsed = JSON.parse(jsonStr.trim()) as Array<{
         input: string;
         expected_output: string;
         context?: Record<string, unknown>;
       }>;
-      
+
       const now = new Date();
-      
+
       for (let i = 0; i < parsed.length; i++) {
         const item = parsed[i];
+        // Inherit metadata from base entry, mark as variant
+        const metadata: DatasetEntryMetadata = {
+          ...baseEntry.metadata,
+          source: 'synthetic',
+        };
         entries.push({
           id: `variant-${baseEntry.id}-${Date.now()}-${i}`,
           datasetId: baseEntry.datasetId,
           input: item.input,
           expectedOutput: item.expected_output,
           context: item.context ?? baseEntry.context,
-          metadata: {
-            source: "synthetic-variant",
-            parentId: baseEntry.id,
-            generatedAt: now.toISOString(),
-          },
+          metadata,
           createdAt: now,
         });
       }
@@ -343,7 +355,7 @@ Do not include any explanation or markdown formatting, only the JSON array.`;
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to parse variant response: ${message}`);
     }
-    
+
     return entries;
   }
 }

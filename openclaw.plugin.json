@@ -94,6 +94,23 @@
             "description": "Use DSPy bridge for evolution optimization",
             "default": false
           },
+          "useDspyPrimary": {
+            "type": "boolean",
+            "description": "Use DSPy GEPA as the primary optimizer (hybrid architecture)",
+            "default": false
+          },
+          "preWarmGenerations": {
+            "type": "integer",
+            "description": "Number of genetic generations to run before DSPy (pre-warm phase)",
+            "minimum": 0,
+            "default": 2
+          },
+          "dspyIterations": {
+            "type": "integer",
+            "description": "Maximum GEPA iterations when using DSPy as primary optimizer",
+            "minimum": 1,
+            "default": 10
+          },
           "schedule": {
             "type": "object",
             "description": "Schedule configuration for evolution runs",

@@ -21,6 +21,8 @@ import type { DatasetManager } from "./manager.js";
 import type { DatasetSessionMiner } from "./session-miner.js";
 import type { SyntheticGenerator } from "./synthetic-generator.js";
 import type { GoldenSetLoader } from "./golden-sets.js";
+import { ExternalSessionImporter, type ImportSource } from "./external-importers/orchestrator.js";
+import { SessionMiner } from "../collection/session-miner.js";
 
 /**
  * Options for building a dataset for a skill.
@@ -38,6 +40,12 @@ export interface BuildOptions {
   minQualityScore?: number;
   /** Whether to auto-finalize the dataset after building (default: true) */
   autoFinalize?: boolean;
+  /** Whether to include external sessions (default: false) */
+  includeExternalSessions?: boolean;
+  /** External sources to import from (default: all) */
+  externalSources?: ImportSource[];
+  /** Maximum number of external examples to import (default: 50) */
+  maxExternalExamples?: number;
 }
 
 /**
@@ -57,6 +65,7 @@ export interface BuildStatus {
     synthetic: number;
     mined: number;
     golden: number;
+    external: number;
   };
 }
 
@@ -140,7 +149,7 @@ export class DatasetBuilder {
       datasetId: manifest.id,
       status: "building",
       entryCount: 0,
-      sources: { synthetic: 0, mined: 0, golden: 0 },
+      sources: { synthetic: 0, mined: 0, golden: 0, external: 0 },
     };
     this.buildStatuses.set(manifest.id, buildStatus);
 
@@ -209,6 +218,41 @@ export class DatasetBuilder {
       );
     }
 
+    // Step 5: Import external sessions if enabled
+    if (options?.includeExternalSessions) {
+      try {
+        const sessionMiner = new SessionMiner(this.config);
+        const importer = new ExternalSessionImporter(this.config, sessionMiner);
+        const externalSources = options.externalSources ?? ["claude-code", "copilot", "openclaw"];
+        const maxExternalExamples = options.maxExternalExamples ?? 50;
+
+        // Read skill content for relevance filtering
+        const skillContent = skillDescription; // Use description as skill content for now
+
+        const externalEntries = await importer.importForSkill(
+          skillName,
+          skillContent,
+          externalSources,
+          maxExternalExamples
+        );
+
+        // Update datasetId for external entries
+        const externalEntriesWithDatasetId = externalEntries.map((entry) => ({
+          ...entry,
+          datasetId: manifest.id,
+        }));
+
+        allEntries.push(...externalEntriesWithDatasetId);
+        buildStatus.sources.external = externalEntriesWithDatasetId.length;
+      } catch (error) {
+        // External import failure is acceptable — log and continue
+        console.warn(
+          `[dataset-builder] External session import failed for ${skillName}:`,
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+
     // Add all collected entries to the dataset
     let persistedCount = 0;
     if (allEntries.length > 0) {
@@ -228,6 +272,9 @@ export class DatasetBuilder {
 
     // Update build status with actual persisted count (not attempted count)
     buildStatus.entryCount = persistedCount;
+
+    // Log difficulty distribution summary if entries have metadata
+    this.logDifficultyDistribution(allEntries);
 
     // Step 5: Finalize if autoFinalize is enabled
     // Source: DatasetManager.finalizeDataset() signature from manager.ts
@@ -281,13 +328,53 @@ export class DatasetBuilder {
       datasetId,
       status: manifest.status,
       entryCount: manifest.entryCount,
-      sources: { synthetic: 0, mined: 0, golden: 0 },
+      sources: { synthetic: 0, mined: 0, golden: 0, external: 0 },
     };
 
     // Store for future lookups
     this.buildStatuses.set(datasetId, status);
 
     return status;
+  }
+
+  /**
+   * Log a summary of difficulty distribution for dataset entries.
+   *
+   * @param entries - Array of dataset entries to analyze
+   */
+  private logDifficultyDistribution(entries: DatasetEntry[]): void {
+    if (entries.length === 0) {
+      return;
+    }
+
+    const counts = {
+      easy: 0,
+      medium: 0,
+      hard: 0,
+      unknown: 0,
+    };
+
+    for (const entry of entries) {
+      const difficulty = entry.metadata?.difficulty;
+      if (difficulty === 'easy') {
+        counts.easy++;
+      } else if (difficulty === 'medium') {
+        counts.medium++;
+      } else if (difficulty === 'hard') {
+        counts.hard++;
+      } else {
+        counts.unknown++;
+      }
+    }
+
+    const total = entries.length;
+    console.log(`[dataset-builder] Difficulty distribution:`);
+    console.log(`  easy: ${counts.easy} (${((counts.easy / total) * 100).toFixed(1)}%)`);
+    console.log(`  medium: ${counts.medium} (${((counts.medium / total) * 100).toFixed(1)}%)`);
+    console.log(`  hard: ${counts.hard} (${((counts.hard / total) * 100).toFixed(1)}%)`);
+    if (counts.unknown > 0) {
+      console.log(`  unknown: ${counts.unknown} (${((counts.unknown / total) * 100).toFixed(1)}%)`);
+    }
   }
 
   /**

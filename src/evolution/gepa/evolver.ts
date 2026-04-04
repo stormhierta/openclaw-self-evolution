@@ -173,6 +173,308 @@ export class GEPAEvolver {
   }
 
   // ==========================================================================
+  // Hybrid Evolution (G3: DSPy as Primary Optimizer)
+  // ==========================================================================
+
+  /**
+   * Run the hybrid evolution architecture:
+   * Phase 1: Pre-warm with genetic evolution (optional)
+   * Phase 2: DSPy GEPA as primary optimizer
+   * Phase 3: Validation with LlmJudge and BenchmarkGate
+   * 
+   * @param skillName - Name of the skill to evolve
+   * @param skillContent - Current skill content/SKILL.md
+   * @param testCases - Array of DatasetEntry test cases for evaluation
+   * @param baselineScore - Baseline fitness score
+   * @param eliteSize - Number of elite variants to preserve
+   * @param targetScore - Target score to stop early
+   * @returns Promise resolving to EvolutionResult
+   */
+  private async runHybridEvolution(
+    skillName: string,
+    skillContent: string,
+    testCases: DatasetEntry[],
+    baselineScore: FitnessScore,
+    eliteSize: number,
+    targetScore: number
+  ): Promise<EvolutionResult> {
+    const engineConfig = this.config.evolution;
+    const preWarmGenerations = engineConfig.preWarmGenerations ?? 2;
+    const dspyIterations = engineConfig.dspyIterations ?? 10;
+
+    console.log(`[evolver] Starting hybrid evolution (DSPy primary)`);
+    console.log(`[evolver] Pre-warm generations: ${preWarmGenerations}`);
+    console.log(`[evolver] DSPy iterations: ${dspyIterations}`);
+
+    // Phase 1: Pre-warm (optional)
+    let candidates: SkillVariant[] = [];
+    if (preWarmGenerations > 0) {
+      console.log(`[evolver] Phase 1: Pre-warm with ${preWarmGenerations} genetic generations`);
+      candidates = await this.runPreWarmPhase(skillName, skillContent, testCases, preWarmGenerations);
+    } else {
+      // No pre-warm: use baseline as single candidate
+      candidates = [{
+        id: `${skillName}-baseline`,
+        skillName,
+        generation: 0,
+        content: skillContent,
+        mutations: [],
+        parents: [],
+        createdAt: new Date(),
+      }];
+    }
+
+    // Phase 2: DSPy primary optimization
+    console.log(`[evolver] Phase 2: DSPy primary optimization`);
+    const dspyResult = await this.runDspyPrimaryPhase(skillName, candidates, testCases, dspyIterations);
+
+    // Phase 3: Validation and result assembly
+    let bestVariant: SkillVariant;
+    let bestScore: FitnessScore;
+
+    if (dspyResult && dspyResult.success && dspyResult.variant) {
+      // DSPy succeeded — validate with full LlmJudge
+      console.log(`[evolver] Phase 3: Validating DSPy result`);
+      bestVariant = dspyResult.variant;
+      bestScore = await this.judge.scoreVariant(bestVariant, testCases);
+      
+      // Check if DSPy actually improved over baseline
+      if (bestScore.overall <= baselineScore.overall) {
+        console.warn(`[evolver] DSPy result did not improve over baseline (${bestScore.overall} vs ${baselineScore.overall})`);
+        // Fall back to best pre-warm candidate if available
+        if (candidates.length > 1) {
+          const bestPreWarm = await this.findBestCandidate(skillName, candidates, testCases);
+          if (bestPreWarm.score.overall > bestScore.overall) {
+            console.log(`[evolver] Using best pre-warm candidate instead`);
+            bestVariant = bestPreWarm.variant;
+            bestScore = bestPreWarm.score;
+          }
+        }
+      }
+    } else {
+      // DSPy failed — fall back to best pre-warm candidate
+      console.warn(`[evolver] DSPy primary optimization failed, falling back to genetic result`);
+      if (candidates.length > 1) {
+        const bestPreWarm = await this.findBestCandidate(skillName, candidates, testCases);
+        bestVariant = bestPreWarm.variant;
+        bestScore = bestPreWarm.score;
+      } else {
+        // No candidates — return baseline
+        bestVariant = candidates[0] || {
+          id: `${skillName}-baseline-fallback`,
+          skillName,
+          generation: 0,
+          content: skillContent,
+          mutations: [],
+          parents: [],
+          createdAt: new Date(),
+        };
+        bestScore = baselineScore;
+      }
+    }
+
+    const improvement = bestScore.overall - baselineScore.overall;
+
+    return {
+      bestVariant,
+      bestScore,
+      baselineScore,
+      improvement: Math.round(improvement * 100) / 100,
+      stoppedEarly: false,
+      stopReason: "max_generations",
+      generationsCompleted: preWarmGenerations,
+      totalVariantsEvaluated: candidates.length,
+      generationHistory: [{
+        generation: 0,
+        variantCount: candidates.length,
+        bestOverallScore: bestScore.overall,
+        averageOverallScore: bestScore.overall,
+        bestVariantId: bestVariant.id,
+      }],
+      status: "completed",
+      completedAt: new Date(),
+    };
+  }
+
+  /**
+   * Phase 1: Pre-warm with genetic evolution.
+   * Runs a limited number of genetic generations to generate diverse starting variants.
+   * 
+   * @param skillName - Name of the skill to evolve
+   * @param skillContent - Current skill content/SKILL.md
+   * @param testCases - Array of DatasetEntry test cases for evaluation
+   * @param preWarmGenerations - Number of generations to run
+   * @returns Array of top SkillVariants from pre-warm phase
+   */
+  private async runPreWarmPhase(
+    skillName: string,
+    skillContent: string,
+    testCases: DatasetEntry[],
+    preWarmGenerations: number
+  ): Promise<SkillVariant[]> {
+    const engineConfig = this.config.evolution;
+    const populationSize = engineConfig.populationSize;
+    const mutationRate = engineConfig.mutationRate;
+    const eliteSize = Math.max(1, Math.min(2, populationSize)); // Small elite for pre-warm
+
+    // Generate initial population
+    const initialVariants = await this.generateValidVariants(skillContent, populationSize, skillContent);
+    let population: SkillVariant[] = initialVariants.map((v) => ({
+      ...v,
+      skillName,
+    }));
+
+    // Run limited genetic generations
+    for (let generation = 1; generation <= preWarmGenerations; generation++) {
+      console.log(`[evolver] Pre-warm generation ${generation}/${preWarmGenerations}`);
+
+      // Score population
+      const scoredVariants = await this.scorePopulation(population, testCases);
+
+      // Select elites
+      const elites = this.selectElites(scoredVariants, eliteSize);
+
+      // Generate new variants from elites
+      const newVariants: SkillVariant[] = [];
+      const mutationsToApply: Mutation[] = [
+        { type: "prompt_rewrite", description: "Rewrite skill prompt" },
+        { type: "example_add", description: "Add new example" },
+        { type: "example_remove", description: "Remove redundant example" },
+        { type: "parameter_tweak", description: "Adjust parameters" },
+        { type: "structure_change", description: "Change structure" },
+      ];
+
+      let attempts = 0;
+      const maxAttempts = (populationSize - eliteSize) * 3;
+
+      while (newVariants.length < populationSize - eliteSize && attempts < maxAttempts) {
+        attempts++;
+        const elite = elites[Math.floor(Math.random() * elites.length)];
+        const mutation = mutationsToApply[Math.floor(Math.random() * mutationsToApply.length)];
+
+        if (Math.random() < mutationRate) {
+          try {
+            const mutatedContent = await this.applyMutation(elite.variant.content, mutation);
+            const mutatedVariant: SkillVariant = {
+              id: `${skillName}-prewarm-gen${generation}-mutant${attempts}-${Date.now()}`,
+              skillName,
+              generation,
+              content: mutatedContent,
+              mutations: [...elite.variant.mutations, mutation],
+              parents: [elite.variant.id],
+              createdAt: new Date(),
+            };
+
+            // Constraint check
+            const constraintCheck = this.constraintValidator.validateVariant(mutatedVariant, skillContent);
+            if (constraintCheck.valid) {
+              newVariants.push(mutatedVariant);
+            }
+          } catch {
+            // Skip failed mutations
+            continue;
+          }
+        } else {
+          // Clone elite
+          newVariants.push({
+            ...elite.variant,
+            id: `${skillName}-prewarm-gen${generation}-clone${attempts}-${Date.now()}`,
+            generation,
+            mutations: [],
+            parents: [elite.variant.id],
+          });
+        }
+      }
+
+      // Next generation
+      population = [...elites.map((e) => e.variant), ...newVariants];
+    }
+
+    // Return all variants from final generation (diverse candidates)
+    return population;
+  }
+
+  /**
+   * Phase 2: DSPy primary optimization.
+   * Calls DSPy bridge with best candidates from pre-warm phase.
+   * 
+   * @param skillName - Name of the skill to evolve
+   * @param candidates - Array of candidate variants from pre-warm
+   * @param testCases - Array of DatasetEntry test cases for evaluation
+   * @param iterations - Number of GEPA iterations
+   * @returns Result with optimized variant or null if failed
+   */
+  private async runDspyPrimaryPhase(
+    skillName: string,
+    candidates: SkillVariant[],
+    testCases: DatasetEntry[],
+    iterations: number
+  ): Promise<{ success: boolean; variant?: SkillVariant; score?: number; error?: string } | null> {
+    // Score candidates to get their fitness scores
+    const scoredCandidates = await this.scorePopulation(candidates, testCases);
+    
+    // Prepare candidates for DSPy bridge
+    const candidateData = scoredCandidates.map((scored) => ({
+      id: scored.variant.id,
+      content: scored.variant.content,
+      score: scored.score.overall / 100, // Convert 0-100 to 0-1 scale
+    }));
+
+    // Call DSPy bridge with primary optimization action
+    const bridgeResult = await this.invokeDspyBridge({
+      action: "optimize_skill_primary",
+      skillName,
+      candidates: candidateData,
+      testCases: testCases.map((tc) => ({
+        input: tc.input,
+        expectedOutput: tc.expectedOutput,
+        context: tc.context,
+      })),
+      config: {
+        maxIterations: iterations,
+      },
+    });
+
+    if (!bridgeResult.success || !bridgeResult.optimizedContent) {
+      return {
+        success: false,
+        error: bridgeResult.error || "DSPy optimization returned no content",
+      };
+    }
+
+    // Create variant from DSPy result
+    const dspyVariant: SkillVariant = {
+      id: `${skillName}-dspy-primary-${Date.now()}`,
+      skillName,
+      generation: candidates[0]?.generation ?? 0,
+      content: bridgeResult.optimizedContent,
+      mutations: [{ type: "prompt_rewrite", description: "DSPy GEPA primary optimization" }],
+      parents: candidates.map((c) => c.id),
+      createdAt: new Date(),
+    };
+
+    return {
+      success: true,
+      variant: dspyVariant,
+      score: (bridgeResult.optimizedScore ?? 0) * 100, // Convert 0-1 to 0-100 scale
+    };
+  }
+
+  /**
+   * Find the best candidate from a list by scoring with LlmJudge.
+   */
+  private async findBestCandidate(
+    skillName: string,
+    candidates: SkillVariant[],
+    testCases: DatasetEntry[]
+  ): Promise<{ variant: SkillVariant; score: FitnessScore }> {
+    const scored = await this.scorePopulation(candidates, testCases);
+    return scored.reduce((best, curr) =>
+      curr.score.overall > best.score.overall ? curr : best
+    );
+  }
+
+  // ==========================================================================
   // Public API
   // ==========================================================================
 
@@ -205,6 +507,18 @@ export class GEPAEvolver {
 
     // Step 1: Score baseline
     const baselineScore = await this.judge.scoreBaseline(skillName, skillContent, testCases);
+
+    // G3: DSPy as primary optimizer — hybrid architecture
+    if (engineConfig.useDspyPrimary) {
+      return this.runHybridEvolution(
+        skillName,
+        skillContent,
+        testCases,
+        baselineScore,
+        safeEliteSize,
+        targetScore
+      );
+    }
 
     // Step 2: Generate initial population with constraint validation
     const initialVariants = await this.generateValidVariants(skillContent, populationSize, skillContent);

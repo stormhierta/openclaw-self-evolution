@@ -28,6 +28,10 @@ export interface EvolutionEngineConfig {
   schedule: {
     cron: string;
   };
+  // G3: DSPy as primary optimizer (hybrid architecture)
+  useDspyPrimary?: boolean;        // Default false — use DSPy GEPA as main loop
+  preWarmGenerations?: number;     // Generations before DSPy (default 2)
+  dspyIterations?: number;         // GEPA max_steps (default 10)
 }
 
 /** Cost control limits for evolution runs */
@@ -352,6 +356,21 @@ export interface DatasetMetadata {
   status: DatasetStatus;
 }
 
+/** Metadata for a dataset entry (Hermes-style for GEPA) */
+export interface DatasetEntryMetadata {
+  // Source tracking
+  source?: 'synthetic' | 'golden' | 'claude-code' | 'copilot' | 'openclaw';
+
+  // Hermes-style metadata for GEPA
+  difficulty?: 'easy' | 'medium' | 'hard';
+  category?: string;
+  expectedBehavior?: string;  // Rubric for LLM judge (richer than exact expectedOutput)
+
+  // Legacy fields
+  outcomeType?: string;
+  rewardSignal?: number;
+}
+
 /** A single training example in a dataset */
 export interface DatasetEntry {
   id: string;
@@ -360,7 +379,7 @@ export interface DatasetEntry {
   expectedOutput: string;
   context?: Record<string, unknown>;
   score?: number;
-  metadata?: Record<string, unknown>;
+  metadata?: DatasetEntryMetadata;  // Typed
   createdAt: Date;
 }
 

@@ -198,6 +198,171 @@ def _get_optimizer(dspy_module, metric, max_iterations: int):
 
 
 # ---------------------------------------------------------------------------
+# Primary optimization entry point (G3: DSPy as primary optimizer)
+# ---------------------------------------------------------------------------
+
+def optimize_skill_primary(request: dict) -> dict:
+    """Primary optimization entry point — uses DSPy GEPA as the main loop.
+    
+    Accepts multiple starting candidates from the pre-warm phase and uses
+    the highest-scoring candidate as the baseline for DSPy optimization.
+    
+    Args:
+        request: Dict containing candidates, testCases, skillName, config
+        
+    Returns:
+        Dict with optimization results in the standard JSON format.
+    """
+    dspy = _get_dspy()
+    
+    # Extract request fields
+    candidates = request.get("candidates", [])
+    test_cases = request.get("testCases", [])
+    skill_name = request.get("skillName", "unknown")
+    config = request.get("config", {})
+    
+    max_iterations = int(config.get("maxIterations", 10))
+    
+    # Validate candidates
+    if not candidates:
+        return {
+            "success": False,
+            "optimizedContent": "",
+            "baselineScore": 0.0,
+            "optimizedScore": 0.0,
+            "improvement": 0.0,
+            "trainExamples": 0,
+            "valExamples": 0,
+            "holdoutExamples": 0,
+            "optimizer": "none",
+            "error": "No candidates provided for primary optimization",
+        }
+    
+    # Select the highest-scoring candidate as baseline
+    best_candidate = max(candidates, key=lambda c: c.get("score", 0.0))
+    skill_content = best_candidate.get("content", "")
+    baseline_score = float(best_candidate.get("score", 0.0))
+    
+    # Validate minimum test cases
+    if len(test_cases) < 3:
+        return {
+            "success": False,
+            "optimizedContent": skill_content,
+            "baselineScore": baseline_score,
+            "optimizedScore": baseline_score,
+            "improvement": 0.0,
+            "trainExamples": 0,
+            "valExamples": 0,
+            "holdoutExamples": 0,
+            "optimizer": "none",
+            "error": f"Insufficient test cases: {len(test_cases)} provided, minimum 3 required for optimization",
+        }
+    
+    try:
+        # Configure DSPy with MiniMax
+        lm = _build_lm(config)
+        dspy.configure(lm=lm)
+        
+        # Parse test cases into DSPy Examples
+        examples = []
+        for tc in test_cases:
+            ex = dspy.Example(
+                task_input=tc.get("input", ""),
+                expected_behavior=tc.get("expectedOutput", tc.get("expected_behavior", "")),
+            ).with_inputs("task_input")
+            examples.append(ex)
+        
+        # Split into train/val/holdout
+        trainset, valset, holdout = split_dataset(examples)
+        
+        # Create baseline skill module from best candidate
+        baseline_module = build_skill_module(dspy, skill_content)
+        
+        # Get optimizer (GEPA preferred, fallback to MIPROv2)
+        import dspy.teleprompt  # noqa: F401 — ensures teleprompt is accessible
+        optimizer, optimizer_name = _get_optimizer(dspy, skill_fitness_metric, max_iterations)
+        
+        # Run optimization
+        if optimizer_name == "GEPA":
+            optimized_module = optimizer.compile(
+                baseline_module,
+                trainset=trainset,
+                valset=valset,
+            )
+        else:
+            # MIPROv2 and MIPRO don't use valset in the same way
+            optimized_module = optimizer.compile(
+                baseline_module,
+                trainset=trainset,
+            )
+        
+        # Evaluate on holdout set
+        baseline_scores = []
+        optimized_scores = []
+        
+        for ex in holdout:
+            with dspy.context(lm=lm):
+                # Score baseline
+                baseline_pred = baseline_module(ex.task_input)
+                baseline_scores.append(skill_fitness_metric(ex, baseline_pred))
+                
+                # Score optimized
+                optimized_pred = optimized_module(ex.task_input)
+                optimized_scores.append(skill_fitness_metric(ex, optimized_pred))
+        
+        # Calculate averages
+        avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores)) if baseline_scores else baseline_score
+        avg_optimized = sum(optimized_scores) / max(1, len(optimized_scores)) if optimized_scores else baseline_score
+        improvement = avg_optimized - avg_baseline
+        
+        # Extract optimized skill text from the predictor's signature instructions
+        try:
+            optimized_content = (
+                optimized_module.predict.signature.instructions
+                or skill_content
+            )
+        except Exception:
+            try:
+                # Fallback paths for other DSPy versions
+                optimized_content = (
+                    getattr(optimized_module, 'predictor', None) and
+                    getattr(optimized_module.predictor, 'signature', None) and
+                    optimized_module.predictor.signature.instructions
+                ) or skill_content
+            except Exception:
+                optimized_content = skill_content
+        
+        return {
+            "success": True,
+            "optimizedContent": optimized_content,
+            "baselineScore": round(avg_baseline, 4),
+            "optimizedScore": round(avg_optimized, 4),
+            "improvement": round(improvement, 4),
+            "trainExamples": len(trainset),
+            "valExamples": len(valset),
+            "holdoutExamples": len(holdout),
+            "optimizer": optimizer_name,
+            "candidateCount": len(candidates),
+            "bestCandidateId": best_candidate.get("id", "unknown"),
+        }
+        
+    except Exception as e:
+        # Return original content with error info
+        return {
+            "success": False,
+            "optimizedContent": skill_content,
+            "baselineScore": baseline_score,
+            "optimizedScore": baseline_score,
+            "improvement": 0.0,
+            "trainExamples": 0,
+            "valExamples": 0,
+            "holdoutExamples": 0,
+            "optimizer": "none",
+            "error": f"Primary optimization failed: {str(e)}",
+        }
+
+
+# ---------------------------------------------------------------------------
 # Main optimization entry point
 # ---------------------------------------------------------------------------
 
@@ -376,7 +541,24 @@ def main() -> None:
     
     action = request.get("action", "")
     
-    if action == "optimize_skill":
+    if action == "optimize_skill_primary":
+        try:
+            result = optimize_skill_primary(request)
+            print(json.dumps(result))
+            sys.exit(0 if result.get("success") else 1)
+        except ImportError as e:
+            print(json.dumps({
+                "success": False,
+                "error": str(e),
+            }))
+            sys.exit(1)
+        except Exception as e:
+            print(json.dumps({
+                "success": False,
+                "error": f"Unexpected error: {str(e)}",
+            }))
+            sys.exit(1)
+    elif action == "optimize_skill":
         try:
             result = optimize_skill(request)
             print(json.dumps(result))

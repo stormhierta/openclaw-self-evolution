@@ -233,7 +233,7 @@ Input: ${testCase.input}
 ${testCase.context ? `Context: ${JSON.stringify(testCase.context)}` : ""}
 
 ## EXPECTED BEHAVIOR
-${testCase.expectedOutput}
+${testCase.metadata?.expectedBehavior ?? testCase.expectedOutput}
 
 ## EVALUATION
 
