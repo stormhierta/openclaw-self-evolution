@@ -1,0 +1,47 @@
+{
+  "name": "openclaw-self-evolution",
+  "version": "0.1.0",
+  "description": "Self-evolution pipeline for OpenClaw skills using genetic algorithms and LLM-as-judge fitness evaluation",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "NODE_OPTIONS=\"--experimental-vm-modules\" jest",
+    "test:watch": "jest --watch",
+    "setup:python": "pip install -r python/requirements.txt",
+    "clean": "rm -rf dist",
+    "dev": "tsc --watch",
+    "test:unit": "NODE_OPTIONS=\"--experimental-vm-modules\" jest --testPathPattern=unit",
+    "test:integration": "NODE_OPTIONS=\"--experimental-vm-modules\" jest --testPathPattern=integration"
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "self-evolution",
+    "skill-optimization",
+    "genetic-algorithm",
+    "dspy"
+  ],
+  "author": "OpenClaw Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.0.0",
+    "jest": "^29.0.0",
+    "openclaw": "file:/home/stormhierta/.npm-global/lib/node_modules/openclaw",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  }
+}

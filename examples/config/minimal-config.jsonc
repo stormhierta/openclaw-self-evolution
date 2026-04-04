@@ -1,0 +1,31 @@
+{
+  "enabled": true,
+  "trajectory": {
+    "enabled": true,
+    "sampleRate": 1.0,
+    "maxTurnsPerSession": 200
+  },
+  "evolution": {
+    "autoRun": false,
+    "maxGenerations": 5,
+    "populationSize": 5,
+    "mutationRate": 0.15,
+    "eliteSize": 1,
+    "targetSkills": [],
+    "useDspyBridge": false,
+    "schedule": {
+      "cron": "0 2 * * *"
+    }
+  },
+  "costLimits": {
+    "maxTokensPerRun": 200000,
+    "maxCostPerRun": 10.00,
+    "maxConcurrentRuns": 1
+  },
+  "retentionDays": 14,
+  "storage": {
+    "trajectoryDbPath": ".data/trajectories.db",
+    "datasetPath": ".data/datasets/",
+    "evolutionLogPath": ".data/evolution-runs/"
+  }
+}

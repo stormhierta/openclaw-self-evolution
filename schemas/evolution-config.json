@@ -1,0 +1,147 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OpenClaw Self-Evolution Plugin Configuration",
+  "description": "Configuration schema for the self-evolution pipeline plugin",
+  "type": "object",
+  "required": [],
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "description": "Whether the self-evolution plugin is enabled",
+      "default": true
+    },
+    "trajectory": {
+      "type": "object",
+      "description": "Trajectory collection configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable trajectory data collection",
+          "default": true
+        },
+        "sampleRate": {
+          "type": "number",
+          "description": "Fraction of sessions to sample (0.0-1.0)",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 1.0
+        },
+        "maxTurnsPerSession": {
+          "type": "integer",
+          "description": "Maximum number of turns to record per session",
+          "minimum": 1,
+          "default": 1000
+        }
+      },
+      "additionalProperties": false
+    },
+    "evolution": {
+      "type": "object",
+      "description": "Evolution engine configuration",
+      "properties": {
+        "autoRun": {
+          "type": "boolean",
+          "description": "Automatically run evolution on skills when data is available",
+          "default": false
+        },
+        "maxGenerations": {
+          "type": "integer",
+          "description": "Maximum number of generations per evolution run",
+          "minimum": 1,
+          "default": 10
+        },
+        "populationSize": {
+          "type": "integer",
+          "description": "Size of the population for genetic algorithm",
+          "minimum": 2,
+          "default": 20
+        },
+        "mutationRate": {
+          "type": "number",
+          "description": "Probability of mutation per variant (0.0-1.0)",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.3
+        },
+        "eliteSize": {
+          "type": "integer",
+          "description": "Number of elite variants to preserve each generation",
+          "minimum": 0,
+          "default": 2
+        },
+        "targetSkills": {
+          "type": "array",
+          "description": "Target skills for evolution",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "schedule": {
+          "type": "object",
+          "description": "Schedule configuration for evolution runs",
+          "properties": {
+            "cron": {
+              "type": "string",
+              "description": "Cron expression for scheduled runs",
+              "default": "0 2 * * *"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "costLimits": {
+      "type": "object",
+      "description": "Cost control limits for evolution runs",
+      "properties": {
+        "maxTokensPerRun": {
+          "type": "integer",
+          "description": "Maximum LLM tokens allowed per evolution run",
+          "minimum": 1,
+          "default": 1000000
+        },
+        "maxCostPerRun": {
+          "type": "number",
+          "description": "Maximum estimated cost in USD per evolution run",
+          "minimum": 0,
+          "default": 50.0
+        },
+        "maxConcurrentRuns": {
+          "type": "integer",
+          "description": "Maximum number of concurrent evolution runs",
+          "minimum": 1,
+          "default": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "retentionDays": {
+      "type": "integer",
+      "description": "Number of days to retain trajectory and evolution data",
+      "minimum": 1,
+      "default": 90
+    },
+    "storage": {
+      "type": "object",
+      "description": "Storage configuration",
+      "properties": {
+        "trajectoryDbPath": {
+          "type": "string",
+          "description": "Path to SQLite database for trajectory storage"
+        },
+        "datasetPath": {
+          "type": "string",
+          "description": "Path to dataset storage directory"
+        },
+        "evolutionLogPath": {
+          "type": "string",
+          "description": "Path to evolution run logs"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,185 @@
+{
+  "id": "self-evolution",
+  "name": "Self-Evolution Pipeline",
+  "description": "Self-evolution pipeline for OpenClaw skills using genetic algorithms and LLM-as-judge fitness evaluation",
+  "version": "0.1.0",
+  "contracts": {
+    "tools": [
+      "propose_skill_edit",
+      "run_evolution",
+      "evolution_status",
+      "dataset_build",
+      "benchmark_run"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "Whether the self-evolution plugin is enabled",
+        "default": true
+      },
+      "trajectory": {
+        "type": "object",
+        "description": "Trajectory collection configuration",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Enable trajectory data collection",
+            "default": true
+          },
+          "sampleRate": {
+            "type": "number",
+            "description": "Fraction of sessions to sample (0.0-1.0)",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 1.0
+          },
+          "maxTurnsPerSession": {
+            "type": "integer",
+            "description": "Maximum number of turns to record per session",
+            "minimum": 1,
+            "default": 1000
+          }
+        }
+      },
+      "evolution": {
+        "type": "object",
+        "description": "Evolution engine configuration",
+        "additionalProperties": false,
+        "properties": {
+          "autoRun": {
+            "type": "boolean",
+            "description": "Automatically run evolution on skills when data is available",
+            "default": false
+          },
+          "maxGenerations": {
+            "type": "integer",
+            "description": "Maximum number of generations per evolution run",
+            "minimum": 1,
+            "default": 10
+          },
+          "populationSize": {
+            "type": "integer",
+            "description": "Size of the population for genetic algorithm",
+            "minimum": 2,
+            "default": 20
+          },
+          "mutationRate": {
+            "type": "number",
+            "description": "Probability of mutation per variant (0.0-1.0)",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.3
+          },
+          "eliteSize": {
+            "type": "integer",
+            "description": "Number of elite variants to preserve each generation",
+            "minimum": 0,
+            "default": 2
+          },
+          "targetSkills": {
+            "type": "array",
+            "description": "Target skills for evolution",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "useDspyBridge": {
+            "type": "boolean",
+            "description": "Use DSPy bridge for evolution optimization",
+            "default": false
+          },
+          "schedule": {
+            "type": "object",
+            "description": "Schedule configuration for evolution runs",
+            "additionalProperties": false,
+            "properties": {
+              "cron": {
+                "type": "string",
+                "description": "Cron expression for scheduled runs",
+                "default": "0 2 * * *"
+              }
+            }
+          }
+        }
+      },
+      "costLimits": {
+        "type": "object",
+        "description": "Cost control limits for evolution runs",
+        "additionalProperties": false,
+        "properties": {
+          "maxTokensPerRun": {
+            "type": "integer",
+            "description": "Maximum LLM tokens allowed per evolution run",
+            "minimum": 1,
+            "default": 1000000
+          },
+          "maxCostPerRun": {
+            "type": "number",
+            "description": "Maximum estimated cost in USD per evolution run",
+            "minimum": 0,
+            "default": 50.0
+          },
+          "maxConcurrentRuns": {
+            "type": "integer",
+            "description": "Maximum number of concurrent evolution runs",
+            "minimum": 1,
+            "default": 2
+          }
+        }
+      },
+      "sizeLimits": {
+        "type": "object",
+        "description": "Size and length limits for skill content",
+        "additionalProperties": false,
+        "properties": {
+          "maxSkillSizeBytes": {
+            "type": "integer",
+            "description": "Maximum skill file size in bytes",
+            "minimum": 1
+          },
+          "maxDescriptionLength": {
+            "type": "integer",
+            "description": "Maximum skill description length in characters",
+            "minimum": 1
+          },
+          "maxSectionCount": {
+            "type": "integer",
+            "description": "Maximum number of sections in a skill",
+            "minimum": 1
+          }
+        }
+      },
+      "retentionDays": {
+        "type": "integer",
+        "description": "Number of days to retain trajectory and evolution data",
+        "minimum": 1,
+        "default": 90
+      },
+      "storage": {
+        "type": "object",
+        "description": "Storage configuration",
+        "additionalProperties": false,
+        "properties": {
+          "trajectoryDbPath": {
+            "type": "string",
+            "description": "Path to SQLite database for trajectory storage"
+          },
+          "datasetPath": {
+            "type": "string",
+            "description": "Path to dataset storage directory"
+          },
+          "evolutionLogPath": {
+            "type": "string",
+            "description": "Path to evolution run logs"
+          }
+        }
+      }
+    }
+  }
+}

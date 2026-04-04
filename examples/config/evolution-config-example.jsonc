@@ -1,0 +1,50 @@
+// Example evolution config for openclaw-self-evolution plugin — full options shown with explanations
+// See also: minimal-config.jsonc for a minimal working configuration
+
+{
+  "enabled": true,
+
+  "trajectory": {
+    // Trajectory collection logs agent session turns/episodes for training data generation
+    "enabled": true,
+    "sampleRate": 1.0,
+    "maxTurnsPerSession": 200
+  },
+
+  "evolution": {
+    // Evolution engine configuration
+    "autoRun": false,
+    "maxGenerations": 10,
+    "populationSize": 8,
+    "mutationRate": 0.15,
+    "eliteSize": 2,
+    // Top N variants are passed to next generation unchanged (elitism)
+    "targetSkills": ["weather", "web-search"],
+    // Skills eligible for evolution; empty array = all skills
+
+    "schedule": {
+      "cron": "0 2 * * *"
+      // Run evolution automatically at 2 AM daily. Use 'null' to disable auto-run
+    }
+  },
+
+  "costLimits": {
+    // Cost control to prevent runaway evolution runs
+    "maxTokensPerRun": 500000,
+    // Maximum tokens per single evolution run
+    "maxCostPerRun": 25.00,
+    // Maximum USD cost per single evolution run
+    "maxConcurrentRuns": 1
+    // Maximum simultaneous evolution runs (token budget dependent)
+  },
+
+"retentionDays": 30,
+  // Days to keep trajectory/evolution logs before pruning
+
+  "storage": {
+    // Paths for persisted data; defaults are relative to plugin directory
+    "trajectoryDbPath": ".data/trajectories.db",
+    "datasetPath": ".data/datasets/",
+    "evolutionLogPath": ".data/evolution-runs/"
+  }
+}
