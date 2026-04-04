@@ -15,6 +15,7 @@
 import Database from "better-sqlite3";
 import type { EvolutionConfig, TurnRecordRow, EpisodeRecordRow, TrajectoryFilter } from "../types.js";
 import type { TrajectoryHookHandler } from "../hooks/trajectory-hooks.js";
+import type { OutcomeLabeler } from "./outcome-labeler.js";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 
@@ -55,17 +56,32 @@ export class TrajectoryLogger {
   private isFlushing = false;
   private apiKey: string;
   private apiBaseUrl: string;
+  private outcomeLabeler: OutcomeLabeler | null = null;
 
   // Prepared statements for performance
   private insertTurnStmt: Database.Statement | null = null;
   private insertEpisodeStmt: Database.Statement | null = null;
   private queryTurnsStmt: Database.Statement | null = null;
 
-  constructor(config: EvolutionConfig, handler: TrajectoryHookHandler) {
+  constructor(config: EvolutionConfig, handler: TrajectoryHookHandler, outcomeLabeler?: OutcomeLabeler) {
     this.config = config;
     this.handler = handler;
     this.apiKey = process.env.MINIMAX_API_KEY ?? "";
     this.apiBaseUrl = "https://api.minimax.io";
+    this.outcomeLabeler = outcomeLabeler ?? null;
+  }
+
+  /**
+   * Set the outcome labeler for background labeling.
+   * Called after construction when labeler is available.
+   * FIX 5: Passes the shared DB instance to the labeler.
+   */
+  setOutcomeLabeler(labeler: OutcomeLabeler): void {
+    this.outcomeLabeler = labeler;
+    // FIX 5: If DB is already initialized, share it with the labeler
+    if (this.db && this.isInitialized) {
+      labeler.setDatabase(this.db);
+    }
   }
 
   /**
@@ -350,9 +366,28 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation"}`;
       `);
 
       this.isInitialized = true;
+
+      // FIX 5: Share DB with outcome labeler if already set
+      if (this.outcomeLabeler) {
+        this.outcomeLabeler.setDatabase(this.db);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to initialize trajectory database at ${dbPath}: ${message}`, { cause: error });
+    }
+  }
+
+  /**
+   * Process labeling chunks in background (fire-and-forget).
+   * Processes turns in chunks of 20 to avoid rate limits.
+   */
+  private async processLabelingChunks(turns: TurnRecordRow[]): Promise<void> {
+    if (!this.outcomeLabeler) return;
+    
+    const chunkSize = 20;
+    for (let i = 0; i < turns.length; i += chunkSize) {
+      const chunk = turns.slice(i, i + chunkSize);
+      await this.outcomeLabeler.labelBatch(chunk);
     }
   }
 
@@ -362,10 +397,11 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation"}`;
    * Drains buffer from hook handler, writes to SQLite, returns count written.
    * Uses prepared statements for efficiency.
    * 
-   * Computes reward signals using LLM-as-judge for turns with target_skill set.
-   * 
    * FIX 1: Snapshots turns before processing to avoid race condition where
-   * new turns added during async LLM calls get lost when clearing buffer.
+   * new turns added during async operations get lost when clearing buffer.
+   * 
+   * FIX 1 (P3-B): Removed inline LLM calls from flush(). Reward signals are
+   * computed asynchronously via OutcomeLabeler after DB commit (fire-and-forget).
    * 
    * @returns Number of records written
    */
@@ -379,8 +415,8 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation"}`;
     }
 
     // FIX 1: Snapshot the current turns and episodes — only commit THESE
-    // This prevents race condition where turns added during await are lost
-    let turns = this.handler.getFinalizedTurns();
+    // This prevents race condition where turns added during operations are lost
+    const turns = this.handler.getFinalizedTurns();
     const episodes = this.handler.getCompletedEpisodes();
 
     if (turns.length === 0 && episodes.length === 0) {
@@ -391,26 +427,11 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation"}`;
     const committedTurnIds = new Set(turns.map(t => t.id));
     const committedEpisodeIds = new Set(episodes.map(e => e.id));
 
-    // Compute reward signals using LLM-as-judge for turns with target_skill
-    // This replaces the token-ratio heuristic with actual task outcome evaluation
-    turns = await Promise.all(
-      turns.map(async (turn) => {
-        // Only recompute if target_skill is set (cost control)
-        if (turn.target_skill) {
-          const reward = await this.computeRewardSignal(turn);
-          if (reward !== undefined) {
-            return { ...turn, reward_signal: reward };
-          }
-        }
-        return turn;
-      })
-    );
-
     let writtenCount = 0;
 
     // Use a transaction for atomicity - any error rolls back all changes
     const transaction = this.db.transaction(() => {
-      // Insert turns
+      // Insert turns (reward_signal is NULL by default - will be labeled later)
       for (const turn of turns) {
         this.insertTurnStmt!.run(
           turn.id,
@@ -425,7 +446,7 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation"}`;
           turn.action_json,
           turn.outcome_type,
           turn.outcome_json,
-          turn.reward_signal ?? null,
+          turn.reward_signal ?? null,  // NULL if not set (Fix 3)
           turn.skills_used,
           turn.target_skill ?? null
         );
@@ -453,6 +474,15 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation"}`;
       // FIX 1: Only remove the specific turns/episodes we committed (not any new ones added during await)
       this.handler.removeFinalizedTurns(committedTurnIds);
       this.handler.removeCompletedEpisodes(committedEpisodeIds);
+
+      // FIX 1 (P3-B): Fire-and-forget background labeling for turns with target_skill
+      // This happens AFTER DB commit so flush() doesn't block on LLM calls
+      const targetSkillTurns = turns.filter(t => t.target_skill && committedTurnIds.has(t.id));
+      if (targetSkillTurns.length > 0 && this.outcomeLabeler) {
+        this.processLabelingChunks(targetSkillTurns).catch(err => {
+          console.warn("[trajectory-logger] Background labeling error:", err);
+        });
+      }
     } catch (error) {
       console.error("[trajectory-logger] Transaction failed:", error);
       // Buffers are NOT cleared - data is preserved for next flush attempt

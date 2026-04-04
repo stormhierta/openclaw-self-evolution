@@ -30,11 +30,13 @@ import { BenchmarkGate } from "./validation/benchmark-gate.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { TrajectoryHookHandler } from "./hooks/trajectory-hooks.js";
+import { OutcomeLabeler } from "./collection/outcome-labeler.js";
 import { GitManager } from "./deployment/git-manager.js";
 import { MetricsReporter } from "./deployment/metrics-reporter.js";
 import { PrBuilder } from "./deployment/pr-builder.js";
 import { ReviewQueue } from "./deployment/review-queue.js";
 import { TrajectoryLogger } from "./collection/trajectory-logger.js";
+import { EvolutionTrigger } from "./automation/evolution-trigger.js";
 import { SessionMiner } from "./collection/session-miner.js";
 import { RubricRegistry } from "./evolution/fitness/rubrics.js";
 import { LlmJudge } from "./evolution/fitness/llm-judge.js";
@@ -64,11 +66,15 @@ let pluginConfig: EvolutionConfig;
 let trajectoryHandler: TrajectoryHookHandler | null = null;
 // FIX 4: Trajectory logger instance for persisting trajectory data
 let trajectoryLogger: TrajectoryLogger | null = null;
+// P3-B: Outcome labeler for RL trajectory labeling
+let outcomeLabeler: OutcomeLabeler | null = null;
 // FIX 4: Shared DatasetManager instance (initialized once in register)
 let datasetManager: DatasetManager | null = null;
 // Phase 7: Deployment stack instances
 let prBuilder: PrBuilder | null = null;
 let reviewQueue: ReviewQueue | null = null;
+// P3-A: Self-triggered evolution instance
+let evolutionTrigger: EvolutionTrigger | null = null;
 
 /**
  * Get the plugin configuration (for internal use)
@@ -91,6 +97,100 @@ export function getTrajectoryLogger(): TrajectoryLogger | null {
   return trajectoryLogger;
 }
 
+/**
+ * P3-B: Get the outcome labeler instance (for testing/internal use)
+ */
+export function getOutcomeLabeler(): OutcomeLabeler | null {
+  return outcomeLabeler;
+}
+
+/**
+ * P3-A: Get the evolution trigger instance (for testing/internal use)
+ */
+export function getEvolutionTrigger(): EvolutionTrigger | null {
+  return evolutionTrigger;
+}
+
+
+/**
+ * Factory for check_evolution_need tool
+ * Source: matching bundled plugin firecrawl tool pattern
+ */
+function createCheckEvolutionNeedTool(config: EvolutionConfig): AnyAgentTool {
+  return {
+    name: "check_evolution_need",
+    label: "Check Evolution Need",
+    description: "Check if a skill needs evolution based on recent performance data",
+    parameters: {
+      type: "object",
+      properties: {
+        skillName: {
+          type: "string",
+          description: "Name of the skill to check (omit to check all tracked skills)",
+        },
+      },
+    },
+    execute: async (_toolCallId: string, args: Record<string, unknown>) => {
+      try {
+        if (!evolutionTrigger) {
+          return jsonResult({
+            success: false,
+            error: "EvolutionTrigger not initialized",
+            decisions: null,
+          });
+        }
+
+        const skillName = args.skillName as string | undefined;
+
+        if (skillName) {
+          // Check specific skill
+          const decision = await evolutionTrigger.checkSkill(skillName);
+          return jsonResult({
+            success: true,
+            skillName: decision.skillName,
+            shouldEvolve: decision.shouldEvolve,
+            reason: decision.reason,
+            urgency: decision.urgency,
+            currentPerformance: {
+              totalTurns: decision.currentPerformance.totalTurns,
+              successRate: decision.currentPerformance.successRate,
+              avgRewardSignal: decision.currentPerformance.avgRewardSignal,
+              turnsInWindow: decision.currentPerformance.turnsInWindow,
+              lastEvaluated: decision.currentPerformance.lastEvaluated.toISOString(),
+            },
+          });
+        } else {
+          // Check all tracked skills
+          const decisions = await evolutionTrigger.checkAllSkills();
+          return jsonResult({
+            success: true,
+            checkedAll: true,
+            skillsNeedingEvolution: decisions.length,
+            decisions: decisions.map((d) => ({
+              skillName: d.skillName,
+              shouldEvolve: d.shouldEvolve,
+              reason: d.reason,
+              urgency: d.urgency,
+              currentPerformance: {
+                totalTurns: d.currentPerformance.totalTurns,
+                successRate: d.currentPerformance.successRate,
+                avgRewardSignal: d.currentPerformance.avgRewardSignal,
+                turnsInWindow: d.currentPerformance.turnsInWindow,
+                lastEvaluated: d.currentPerformance.lastEvaluated.toISOString(),
+              },
+            })),
+          });
+        }
+      } catch (err) {
+        return jsonResult({
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          decisions: null,
+        });
+      }
+    },
+  };
+}
 // ============================================================================
 // Hook Handlers (delegating to TrajectoryHookHandler)
 // ============================================================================
@@ -911,6 +1011,84 @@ function createBenchmarkRunTool(config: EvolutionConfig): AnyAgentTool {
   };
 }
 
+/**
+ * Factory for label_trajectories tool
+ * P3-B: Label recent trajectory turns with outcome quality scores for RL training
+ * Source: matching bundled plugin firecrawl tool pattern
+ */
+function createLabelTrajectoriesTool(config: EvolutionConfig): AnyAgentTool {
+  return {
+    name: "label_trajectories",
+    label: "Label Trajectories",
+    description: "Label recent trajectory turns with outcome quality scores for RL training",
+    parameters: {
+      type: "object",
+      properties: {
+        skillName: {
+          type: "string",
+          description: "Optional — label for specific skill",
+        },
+        limit: {
+          type: "number",
+          description: "Optional — max turns to label (default 50)",
+        },
+      },
+    },
+    execute: async (_toolCallId: string, args: Record<string, unknown>) => {
+      try {
+        // P3-B: Use module-level outcomeLabeler
+        if (!outcomeLabeler) {
+          return jsonResult({
+            success: false,
+            error: "OutcomeLabeler not initialized. Ensure trajectory collection is enabled.",
+            labeledCount: 0,
+          });
+        }
+
+        const skillName = args.skillName as string | undefined;
+        const limit = typeof args.limit === "number" ? args.limit : 50;
+
+        // Get unlabeled turns
+        const unlabeledTurns = await outcomeLabeler.getUnlabeledTurns(skillName, limit);
+
+        if (unlabeledTurns.length === 0) {
+          return jsonResult({
+            success: true,
+            labeledCount: 0,
+            message: "No unlabeled turns found",
+          });
+        }
+
+        // Label the batch
+        const results = await outcomeLabeler.labelBatch(unlabeledTurns);
+
+        // Count by outcome type
+        const successCount = results.filter(r => r.outcomeType === "success").length;
+        const partialCount = results.filter(r => r.outcomeType === "partial").length;
+        const failureCount = results.filter(r => r.outcomeType === "failure").length;
+
+        return jsonResult({
+          success: true,
+          labeledCount: results.length,
+          skillName: skillName ?? null,
+          breakdown: {
+            success: successCount,
+            partial: partialCount,
+            failure: failureCount,
+          },
+          averageScore: results.reduce((sum, r) => sum + r.rewardSignal, 0) / results.length,
+        });
+      } catch (err) {
+        return jsonResult({
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          labeledCount: 0,
+        });
+      }
+    },
+  };
+}
+
 // ============================================================================
 // CLI Registration
 // ============================================================================
@@ -1131,6 +1309,9 @@ async function register(api: OpenClawPluginApi): Promise<void> {
   trajectoryHandler = new TrajectoryHookHandler(pluginConfig);
   trajectoryLogger = new TrajectoryLogger(pluginConfig, trajectoryHandler);
 
+  // P3-B: Initialize outcome labeler for RL trajectory labeling
+  outcomeLabeler = new OutcomeLabeler(pluginConfig);
+
   // FIX 4: Initialize shared DatasetManager once (reused across all tool calls)
   datasetManager = new DatasetManager(pluginConfig);
   await datasetManager.initialize();
@@ -1143,6 +1324,10 @@ async function register(api: OpenClawPluginApi): Promise<void> {
   reviewQueue = new ReviewQueue(pluginConfig, prBuilder, gitManager);
   await reviewQueue.initialize();
   logger.info("[self-evolution] Deployment stack initialized (GitManager, PrBuilder, ReviewQueue)");
+
+  // P3-A: Initialize evolution trigger for self-triggered evolution
+  evolutionTrigger = new EvolutionTrigger(pluginConfig);
+  logger.info("[self-evolution] Evolution trigger initialized for self-triggered evolution");
 
   // Register trajectory hooks
   if (pluginConfig.trajectory.enabled) {
@@ -1161,11 +1346,22 @@ async function register(api: OpenClawPluginApi): Promise<void> {
     // FIX 4: Initialize and start the trajectory logger
     try {
       await trajectoryLogger.initialize();
+      // P3-B: Connect outcome labeler to trajectory logger for background labeling
+      trajectoryLogger.setOutcomeLabeler(outcomeLabeler);
       trajectoryLogger.startPeriodicFlush(30_000); // 30 second flush interval
       logger.info("[self-evolution] Trajectory logger initialized and started");
     } catch (error) {
       logger.error(`[self-evolution] Failed to initialize trajectory logger: ${error}`);
       // Don't fail plugin registration if logger fails - hooks still work
+    }
+
+    // P3-B: Initialize outcome labeler
+    try {
+      await outcomeLabeler.initialize();
+      logger.info("[self-evolution] Outcome labeler initialized");
+    } catch (error) {
+      logger.error(`[self-evolution] Failed to initialize outcome labeler: ${error}`);
+      // Don't fail plugin registration if labeler fails
     }
   }
 
@@ -1190,6 +1386,14 @@ async function register(api: OpenClawPluginApi): Promise<void> {
 
   api.registerTool(createBenchmarkRunTool(pluginConfig), {
     name: "benchmark_run",
+  });
+
+  api.registerTool(createCheckEvolutionNeedTool(pluginConfig), {
+    name: "check_evolution_need",
+  });
+
+  api.registerTool(createLabelTrajectoriesTool(pluginConfig), {
+    name: "label_trajectories",
   });
 
   // Register CLI commands
