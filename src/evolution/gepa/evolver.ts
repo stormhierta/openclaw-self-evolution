@@ -282,16 +282,26 @@ export class GEPAEvolver {
       ];
 
       for (let i = 0; i < populationSize - safeEliteSize; i++) {
-        // Pick random elite and random mutation
+        // Pick random elite
         const elite = elites[Math.floor(Math.random() * elites.length)];
-        const mutation =
-          mutationsToApply[Math.floor(Math.random() * mutationsToApply.length)];
+        
+        // Use feedback-guided mutation selection if parent has feedback, otherwise random
+        const randomMutationType = mutationsToApply[Math.floor(Math.random() * mutationsToApply.length)];
+        const mutationType = elite.score?.feedback
+          ? this.selectMutationTypeFromFeedback(elite.score.feedback)
+          : randomMutationType.type;
+        const mutation: Mutation = {
+          type: mutationType,
+          description: mutationsToApply.find(m => m.type === mutationType)?.description || "Feedback-guided mutation",
+        };
 
         if (Math.random() < mutationRate) {
           try {
+            const parentWithScore = { ...elite.variant, fitnessScore: elite.score };
             const mutatedContent = await this.applyMutation(
               elite.variant.content,
-              mutation
+              mutation,
+              parentWithScore  // Pass parent variant with score for reflective mutation
             );
             newVariants.push({
               id: `${skillName}-gen${generation}-mutant${i}-${Date.now()}`,
@@ -343,34 +353,38 @@ export class GEPAEvolver {
     const improvement = bestScored.score.overall - baselineScore.overall;
 
     // Optionally run DSPy bridge to potentially find a better variant
+    // This runs after genetic evolution for final optimization polish
     let bestVariant = bestScored.variant;
     let bestScore = bestScored.score;
     if (engineConfig.useDspyBridge) {
       const bridgeResult = await this.invokeDspyBridge({
+        action: "optimize_skill",
         skillName,
-        skillContent,
+        skillContent: bestScored.variant.content,  // Use best genetic variant, not baseline
         currentBestContent: bestScored.variant.content,
-        currentScore: bestScored.score.overall,
+        baselineScore: bestScored.score.overall,
         testCases: testCases.map((tc) => ({
           input: tc.input,
           expectedOutput: tc.expectedOutput,
           context: tc.context,
         })),
       });
-      if (bridgeResult.success && bridgeResult.optimizedContent && bridgeResult.score !== undefined) {
-        if (bridgeResult.score > bestScore.overall) {
+      if (bridgeResult.success && bridgeResult.optimizedContent && bridgeResult.optimizedScore !== undefined) {
+        // DSPy returns score on 0-1 scale, LLM judge uses 0-100 scale
+        const dspyScore = (bridgeResult.optimizedScore ?? 0) * 100;
+        if (dspyScore > bestScore.overall) {
           bestVariant = {
             id: `${bestScored.variant.id}-dspy-optimized`,
             skillName,
             generation: bestScored.variant.generation,
             content: bridgeResult.optimizedContent,
-            mutations: [{ type: "prompt_rewrite", description: "DSPy optimization" }],
+            mutations: [...bestScored.variant.mutations, { type: "prompt_rewrite", description: "DSPy optimization" }],
             parents: [bestScored.variant.id],
             createdAt: new Date(),
           };
           bestScore = {
             ...bestScored.score,
-            overall: bridgeResult.score,
+            overall: dspyScore,
           };
         }
       }
@@ -458,14 +472,44 @@ export class GEPAEvolver {
   }
 
   /**
+   * Select mutation type based on fitness feedback.
+   * Uses the judge's feedback to determine what kind of mutation is most likely to help.
+   * 
+   * @param feedback - The fitness feedback string from the LLM judge
+   * @returns The mutation type to apply
+   */
+  private selectMutationTypeFromFeedback(feedback: string): Mutation["type"] {
+    const f = feedback.toLowerCase();
+    if (f.includes("unclear") || f.includes("confusing") || f.includes("vague")) {
+      return "prompt_rewrite";
+    }
+    if (f.includes("example") || f.includes("demonstrate") || f.includes("illustrat")) {
+      return "example_add";
+    }
+    if (f.includes("too long") || f.includes("verbose") || f.includes("redundant")) {
+      return "example_remove";
+    }
+    if (f.includes("order") || f.includes("structure") || f.includes("reorgani")) {
+      return "structure_change";
+    }
+    // Default: prompt_rewrite (most generally useful)
+    return "prompt_rewrite";
+  }
+
+  /**
    * Apply a specific mutation to skill content.
    * Uses MiniMax LLM to perform the mutation.
    * 
    * @param skillContent - Original skill content
    * @param mutation - Mutation to apply (from Mutation.type in src/types.ts)
+   * @param parentVariant - Optional parent variant with fitness feedback for reflective mutation
    * @returns Mutated skill content as string
    */
-  async applyMutation(skillContent: string, mutation: Mutation): Promise<string> {
+  async applyMutation(
+    skillContent: string, 
+    mutation: Mutation, 
+    parentVariant?: SkillVariant
+  ): Promise<string> {
     const mutationDescriptions: Record<Mutation["type"], string> = {
       prompt_rewrite:
         "Rewrite the skill's main prompt/description section while preserving the overall structure and goals. Make it clearer, more concise, and more effective.",
@@ -479,6 +523,11 @@ export class GEPAEvolver {
         "Restructure the skill's organization, perhaps regrouping sections, changing the order, or modifying how information is presented. Maintain all valuable content.",
     };
 
+    // Build feedback context for reflective mutation if parent has fitness feedback
+    const feedbackContext = parentVariant?.fitnessScore?.feedback
+      ? `\n## WHY THE CURRENT SKILL NEEDS IMPROVEMENT\n${parentVariant.fitnessScore.feedback}\n\nAddress this specific issue in your improved version.`
+      : "";
+
     const prompt = `You are an expert at improving AI agent skills through careful mutation.
 
 ## ORIGINAL SKILL CONTENT
@@ -489,7 +538,7 @@ ${skillContent}
 ## MUTATION TO APPLY
 ${mutationDescriptions[mutation.type]}
 
-${mutation.description ? `Additional context: ${mutation.description}` : ""}
+${mutation.description ? `Additional context: ${mutation.description}` : ""}${feedbackContext}
 
 ## TASK
 Apply this mutation to the skill content above. Return ONLY the modified skill content, preserving the same format (Markdown with frontmatter). No explanations or commentary outside the skill content itself.
@@ -511,7 +560,7 @@ Return the mutated skill content:`;
    */
   private async invokeDspyBridge(
     request: object
-  ): Promise<{ success: boolean; optimizedContent?: string; score?: number; error?: string }> {
+  ): Promise<{ success: boolean; optimizedContent?: string; optimizedScore?: number; error?: string }> {
     // Find the bridge script relative to project root
     const projectRoot = this.resolveProjectRoot();
     const bridgePath = join(projectRoot, "python", "dspy_bridge.py");
@@ -659,11 +708,9 @@ Return ONLY the variant skill content (Markdown format). No explanations outside
               overall: 0,
               components: {
                 correctness: 0,
-                formatAdherence: 0,
-                efficiency: 0,
-                robustness: 0,
-                clarity: 0,
-              } as FitnessComponents,
+                procedureFollowing: 0,
+                conciseness: 0,
+              },
               evaluatedAt: new Date(),
               method: "llm_judge",
               rawScores: {},

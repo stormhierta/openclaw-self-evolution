@@ -975,11 +975,30 @@ export class TrajectoryHookHandler {
   }
 
   /**
+   * Remove specific finalized turns by ID.
+   * FIX 1: Used by TrajectoryLogger.flush() to remove only the turns that
+   * were successfully committed, avoiding race conditions where new turns
+   * added during async operations would be lost.
+   */
+  removeFinalizedTurns(ids: Set<string>): void {
+    this.finalizedTurns = this.finalizedTurns.filter(turn => !ids.has(turn.id));
+  }
+
+  /**
    * Clear the completed episodes array.
    * Call this after successfully persisting episodes to SQLite.
    */
   clearCompletedEpisodes(): void {
     this.completedEpisodes = [];
+  }
+
+  /**
+   * Remove specific completed episodes by ID.
+   * FIX 1: Used by TrajectoryLogger.flush() to remove only the episodes that
+   * were successfully committed, avoiding race conditions.
+   */
+  removeCompletedEpisodes(ids: Set<string>): void {
+    this.completedEpisodes = this.completedEpisodes.filter(episode => !ids.has(episode.id));
   }
 
   /**

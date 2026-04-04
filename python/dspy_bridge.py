@@ -1,56 +1,168 @@
 #!/usr/bin/env python3
 """
 DSPy Bridge — OpenClaw Self-Evolution Pipeline
-Phase T4.1
-
-A subprocess bridge between the TypeScript evolution pipeline and DSPy.
-Invoked by src/evolution/gepa/evolver.ts.
+Real DSPy + GEPA/MIPROv2 optimization for skill evolution.
 
 Usage:
     echo '{...}' | python dspy_bridge.py
     python dspy_bridge.py '{...}'
+
+Returns JSON via stdout with the optimization results.
 """
 
 import json
 import sys
 import os
-import textwrap
-from typing import Any
+from typing import Any, List, Optional
+from dataclasses import dataclass
 
 
 # ---------------------------------------------------------------------------
-# Lazy DSPy imports — fail gracefully if deps are missing
+# DSPy imports — fail gracefully if deps are missing
 # ---------------------------------------------------------------------------
+
+try:
+    import dspy as _dspy
+except ImportError as _dspy_import_err:
+    _dspy = None  # type: ignore[assignment]
+    _dspy_import_err_msg = str(_dspy_import_err)
+else:
+    _dspy_import_err_msg = ""
+
 
 def _get_dspy():
-    """Import and return the dspy module, raising if unavailable."""
-    try:
-        import dspy
-        return dspy
-    except ImportError as e:
+    """Return the dspy module, raising if unavailable."""
+    if _dspy is None:
         raise ImportError(
             f"DSPy not installed. Run: pip install -r python/requirements.txt. "
-            f"Import error: {e}"
+            f"Import error: {_dspy_import_err_msg}"
         )
+    return _dspy
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers (no DSPy at module load time)
+# SkillModule — DSPy module where skill text is the optimizable parameter
+# ---------------------------------------------------------------------------
+
+class SkillModule:
+    """A DSPy module that wraps a skill file for optimization.
+    
+    The skill text is set as the signature instruction, which DSPy optimizers
+    can modify during compilation. This is the correct pattern for optimization.
+    
+    Note: Does not inherit dspy.Module at class definition time to avoid
+    import-time failures. Inherits dynamically in build_skill_module().
+    """
+    pass
+
+
+def build_skill_module(dspy, skill_text: str):
+    """Build a SkillModule class and instance with the given skill text.
+    
+    Deferred to runtime to avoid class-level DSPy import errors.
+    """
+    class TaskSignature(dspy.Signature):
+        """Complete a task following the provided skill instructions."""
+        task_input: str = dspy.InputField(desc="The task to complete")
+        output: str = dspy.OutputField(desc="Your response following the skill instructions")
+
+    class _SkillModule(dspy.Module):
+        def __init__(self, skill_text: str):
+            super().__init__()
+            self.skill_text = skill_text
+            # Set the skill as the signature instruction — this is what optimizers modify
+            self.predict = dspy.ChainOfThought(
+                TaskSignature.with_instructions(skill_text)
+            )
+
+        def forward(self, task_input: str):
+            return self.predict(task_input=task_input)
+
+    return _SkillModule(skill_text)
+
+
+# ---------------------------------------------------------------------------
+# Metric function for GEPA — fast keyword overlap as proxy
+# ---------------------------------------------------------------------------
+
+def skill_fitness_metric(example, prediction, trace=None) -> float:
+    """DSPy metric function — scores prediction quality.
+    
+    Uses fast keyword overlap as a proxy for correctness.
+    Full LLM-as-judge is too expensive for every GEPA step.
+    
+    Returns a score between 0.0 and 1.0.
+    """
+    agent_output = getattr(prediction, "output", "") or ""
+    expected = getattr(example, "expected_behavior", "") or ""
+    
+    if not agent_output.strip():
+        return 0.0
+    
+    # Keyword overlap as fast proxy
+    expected_words = set(expected.lower().split())
+    output_words = set(agent_output.lower().split())
+    
+    if expected_words:
+        overlap = len(expected_words & output_words) / len(expected_words)
+        return 0.3 + (0.7 * overlap)
+    
+    return 0.5
+
+
+# ---------------------------------------------------------------------------
+# Dataset splitting — train/val/holdout (50%/25%/25%, minimum 1 per split)
+# ---------------------------------------------------------------------------
+
+def split_dataset(examples: List[Any]) -> tuple[List[Any], List[Any], List[Any]]:
+    """Split examples into train/val/holdout sets (50%/25%/25%).
+    
+    Ensures at least 1 example per split when possible.
+    """
+    n = len(examples)
+    
+    if n == 0:
+        return [], [], []
+    
+    if n == 1:
+        return examples, [], []
+    
+    if n == 2:
+        return examples[:1], examples[1:], []
+    
+    # Minimum 1 per split
+    n_train = max(1, int(n * 0.5))
+    n_val = max(1, int(n * 0.25))
+    n_holdout = max(1, n - n_train - n_val)
+    
+    # Adjust if we over-allocated
+    if n_train + n_val + n_holdout > n:
+        n_train = n - n_val - n_holdout
+    
+    trainset = examples[:n_train]
+    valset = examples[n_train:n_train + n_val]
+    holdout = examples[n_train + n_val:]
+    
+    return trainset, valset, holdout
+
+
+# ---------------------------------------------------------------------------
+# LM configuration — MiniMax API
 # ---------------------------------------------------------------------------
 
 def _build_lm(config: dict):
     """Build a DSPy LM wrapper for the MiniMax OpenAI-compatible endpoint."""
     dspy = _get_dspy()
-
+    
     model = config.get("model", "MiniMax-M2.7")
-    api_key = config.get("apiKey", os.environ.get("MINIMAX_API_KEY", ""))
+    api_key = config.get("apiKey") or os.environ.get("MINIMAX_API_KEY", "")
     api_base = config.get("apiBase", "https://api.minimax.io/v1")
-
+    
     if not api_key:
         raise ValueError("No API key provided: set config.apiKey or MINIMAX_API_KEY env var")
-
+    
     return dspy.LM(
-        f"openai/{model}",
+        model=f"openai/{model}",
         api_key=api_key,
         api_base=api_base,
         temperature=config.get("temperature", 0.7),
@@ -58,179 +170,174 @@ def _build_lm(config: dict):
     )
 
 
-def _llm_judge_score(optimized: str, rubric: dict, lm) -> float:
-    """Use the LLM as a judge to score the optimized skill against the rubric."""
-    rubric_str = json.dumps(rubric, indent=2)
+# ---------------------------------------------------------------------------
+# Optimizer selection — GEPA with fallback to MIPROv2
+# ---------------------------------------------------------------------------
 
-    judge_prompt = textwrap.dedent(f"""\
-        You are an impartial judge evaluating a skill SKILL.md after optimization.
-
-        RUBRIC (criteria weights):
-        {rubric_str}
-
-        OPTIMIZED SKILL CONTENT:
-        {optimized}
-
-        Evaluate the optimized skill against the rubric.
-        Return ONLY a valid JSON object with:
-        {{
-          "score": a float between 0.0 and 1.0,
-          "reason": a brief explanation
-        }}
-        Do not include any text outside the JSON object.
-    """)
-
-    response = lm(judge_prompt)
-    raw = response[0] if isinstance(response, (list, tuple)) else str(response)
-
-    try:
-        json_start = raw.find("{")
-        json_end = raw.rfind("}") + 1
-        if json_start != -1 and json_end > json_start:
-            judge_data = json.loads(raw[json_start:json_end])
-            return float(judge_data.get("score", 0.5))
-    except (json.JSONDecodeError, ValueError, TypeError):
-        pass
-
-    return 0.5
-
-
-def _detect_improvements(orig: str, optimized: str) -> list[str]:
-    """Heuristically describe what changed between original and optimized."""
-    improvements: list[str] = []
-
-    orig_lines = set(l.strip() for l in orig.splitlines() if l.strip())
-    opt_lines = set(l.strip() for l in optimized.splitlines() if l.strip())
-
-    added = opt_lines - orig_lines
-    removed = orig_lines - opt_lines
-
-    if added:
-        improvements.append(f"{len(added)} lines added or modified")
-    if removed:
-        improvements.append(f"{len(removed)} lines removed or replaced")
-
-    # Content length signals
-    delta = len(optimized) - len(orig)
-    if delta > 200:
-        improvements.append("Expanded skill with additional content")
-    elif delta < -200:
-        improvements.append("Streamlined skill — removed verbosity")
-    elif abs(delta) <= 50:
-        improvements.append("Refined wording with minimal length change")
-
-    return improvements
-
-
-def _run_optimization_iteration(
-    skill_content: str,
-    test_cases: list,
-    rubric: dict,
-    lm,
-) -> tuple[str, float, list[str]]:
+def _get_optimizer(dspy_module, metric, max_iterations: int):
+    """Get the best available optimizer (GEPA preferred, MIPROv2 fallback).
+    
+    Checks both dspy.X and dspy.teleprompt.X for compatibility across DSPy versions.
     """
-    Single DSPy-backed optimization iteration.
-    Returns (optimized_content, score, improvements).
-    """
-    dspy = _get_dspy()
+    
+    # Try root namespace first, then teleprompt
+    for attr in ['GEPA', 'MIPROv2', 'MIPRO']:
+        cls = getattr(dspy_module, attr, None) or getattr(dspy_module.teleprompt, attr, None)
+        if cls:
+            try:
+                if attr == 'GEPA':
+                    return cls(metric=metric, max_steps=max_iterations), attr
+                elif attr == 'MIPROv2':
+                    return cls(metric=metric, auto="light"), attr
+                elif attr == 'MIPRO':
+                    return cls(metric=metric), attr
+            except Exception:
+                continue
+    
+    raise RuntimeError("No suitable optimizer found (tried GEPA, MIPROv2, MIPRO)")
 
-    # Build the DSPy module inside the iteration to avoid top-level dspy references
-    class SkillOptimizer(dspy.Module):
-        def __init__(inner_self):
-            super().__init__()
-            inner_self.rewrite = dspy.ChainOfThought(
-                "skill_content, test_cases, rubric -> optimized_skill"
-            )
 
-        def forward(inner_self, skill_content: str, test_cases: list, rubric: dict):
-            test_str = json.dumps(test_cases, indent=2)
-            rubric_str = json.dumps(rubric, indent=2)
-            return inner_self.rewrite(
-                skill_content=skill_content,
-                test_cases=test_str,
-                rubric=rubric_str,
-            )
-
-    optimizer = SkillOptimizer()
-
-    with dspy.context(lm=lm):
-        pred = optimizer(
-            skill_content=skill_content,
-            test_cases=test_cases,
-            rubric=rubric,
-        )
-
-    optimized = pred.optimized_skill.strip()
-    improvements = _detect_improvements(skill_content, optimized)
-    score = _llm_judge_score(optimized, rubric, lm)
-
-    return optimized, score, improvements
-
+# ---------------------------------------------------------------------------
+# Main optimization entry point
+# ---------------------------------------------------------------------------
 
 def optimize_skill(request: dict) -> dict:
-    """
-    Main optimization entry point.
-    Wraps skill in DSPy, runs iterative optimization against test cases + rubric,
-    returns improved content + score.
+    """Main optimization entry point — runs real DSPy + GEPA/MIPROv2 optimization.
+    
+    Args:
+        request: Dict containing skillContent, testCases, rubric, baselineScore, config
+        
+    Returns:
+        Dict with optimization results in the standard JSON format.
     """
     dspy = _get_dspy()
-
-    skill_content = request["skillContent"]
+    
+    # Extract request fields
+    skill_content = request.get("skillContent", "")
     test_cases = request.get("testCases", [])
     rubric = request.get("rubric", {})
     baseline_score = float(request.get("baselineScore", 0.5))
     config = request.get("config", {})
-
+    
     max_iterations = int(config.get("maxIterations", 10))
-
-    lm = _build_lm(config)
-    dspy.configure(lm=lm)
-
-    current_content = skill_content
-    best_content = skill_content
-    best_score = baseline_score
-    iterations = 0
-    all_improvements: list[str] = []
-    plateau_count = 0
-
-    for i in range(max_iterations):
-        iterations = i + 1
-
-        optimized, score, improvements = _run_optimization_iteration(
-            current_content, test_cases, rubric, lm
-        )
-
-        # Merge new improvements
-        for imp in improvements:
-            if imp not in all_improvements:
-                all_improvements.append(imp)
-
-        # Update best if improved
-        if score > best_score:
-            best_score = score
-            best_content = optimized
-            plateau_count = 0
+    
+    # Validate minimum test cases
+    if len(test_cases) < 3:
+        return {
+            "success": False,
+            "optimizedContent": skill_content,
+            "baselineScore": baseline_score,
+            "optimizedScore": baseline_score,
+            "improvement": 0.0,
+            "trainExamples": 0,
+            "valExamples": 0,
+            "holdoutExamples": 0,
+            "optimizer": "none",
+            "error": f"Insufficient test cases: {len(test_cases)} provided, minimum 3 required for optimization",
+        }
+    
+    try:
+        # Configure DSPy with MiniMax
+        lm = _build_lm(config)
+        dspy.configure(lm=lm)
+        
+        # Parse test cases into DSPy Examples
+        examples = []
+        for tc in test_cases:
+            ex = dspy.Example(
+                task_input=tc.get("input", ""),
+                expected_behavior=tc.get("expectedOutput", tc.get("expected_behavior", "")),
+            ).with_inputs("task_input")
+            examples.append(ex)
+        
+        # Split into train/val/holdout
+        trainset, valset, holdout = split_dataset(examples)
+        
+        # Create baseline skill module
+        baseline_module = build_skill_module(dspy, skill_content)
+        
+        # Get optimizer (GEPA preferred, fallback to MIPROv2)
+        # Also make dspy.teleprompt available for older DSPy versions
+        import dspy.teleprompt  # noqa: F401 — ensures teleprompt is accessible
+        optimizer, optimizer_name = _get_optimizer(dspy, skill_fitness_metric, max_iterations)
+        
+        # Run optimization
+        if optimizer_name == "GEPA":
+            optimized_module = optimizer.compile(
+                baseline_module,
+                trainset=trainset,
+                valset=valset,
+            )
         else:
-            plateau_count += 1
-
-        # Early exit conditions
-        if plateau_count >= 3:
-            all_improvements.append(f"Plateau detected at iteration {i + 1}, stopping early")
-            break
-        if score >= 0.98:
-            all_improvements.append("Score reached near-perfect threshold (0.98)")
-            break
-
-        # Prepare next iteration's input: use the latest optimized version
-        current_content = optimized
-
-    return {
-        "success": True,
-        "optimizedContent": best_content,
-        "score": round(best_score, 4),
-        "iterations": iterations,
-        "improvements": all_improvements[:10],
-    }
+            # MIPROv2 and MIPRO don't use valset in the same way
+            optimized_module = optimizer.compile(
+                baseline_module,
+                trainset=trainset,
+            )
+        
+        # Evaluate on holdout set
+        baseline_scores = []
+        optimized_scores = []
+        
+        for ex in holdout:
+            with dspy.context(lm=lm):
+                # Score baseline
+                baseline_pred = baseline_module(ex.task_input)
+                baseline_scores.append(skill_fitness_metric(ex, baseline_pred))
+                
+                # Score optimized
+                optimized_pred = optimized_module(ex.task_input)
+                optimized_scores.append(skill_fitness_metric(ex, optimized_pred))
+        
+        # Calculate averages
+        avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores)) if baseline_scores else baseline_score
+        avg_optimized = sum(optimized_scores) / max(1, len(optimized_scores)) if optimized_scores else baseline_score
+        improvement = avg_optimized - avg_baseline
+        
+        # Extract optimized skill text from the predictor's signature instructions
+        # In DSPy 3.x, the path is module.predict.signature.instructions
+        try:
+            optimized_content = (
+                optimized_module.predict.signature.instructions
+                or skill_content
+            )
+        except Exception:
+            try:
+                # Fallback paths for other DSPy versions
+                optimized_content = (
+                    getattr(optimized_module, 'predictor', None) and
+                    getattr(optimized_module.predictor, 'signature', None) and
+                    optimized_module.predictor.signature.instructions
+                ) or skill_content
+            except Exception:
+                optimized_content = skill_content
+        
+        return {
+            "success": True,
+            "optimizedContent": optimized_content,
+            "baselineScore": round(avg_baseline, 4),
+            "optimizedScore": round(avg_optimized, 4),
+            "improvement": round(improvement, 4),
+            "trainExamples": len(trainset),
+            "valExamples": len(valset),
+            "holdoutExamples": len(holdout),
+            "optimizer": optimizer_name,
+        }
+        
+    except Exception as e:
+        # Return original content with error info
+        return {
+            "success": False,
+            "optimizedContent": skill_content,
+            "baselineScore": baseline_score,
+            "optimizedScore": baseline_score,
+            "improvement": 0.0,
+            "trainExamples": 0,
+            "valExamples": 0,
+            "holdoutExamples": 0,
+            "optimizer": "none",
+            "error": f"Optimization failed: {str(e)}",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -238,42 +345,59 @@ def optimize_skill(request: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    """Main entry point — handles CLI args or stdin input."""
+    
     # Determine input source: CLI arg first, then stdin
     if len(sys.argv) > 1:
         try:
             request = json.loads(sys.argv[1])
         except json.JSONDecodeError as e:
-            print(json.dumps({"success": False, "error": f"Invalid JSON argument: {e}"}))
+            print(json.dumps({
+                "success": False,
+                "error": f"Invalid JSON argument: {e}",
+            }))
             sys.exit(1)
     elif not sys.stdin.isatty():
         raw = sys.stdin.read()
         try:
             request = json.loads(raw) if raw.strip() else {}
         except json.JSONDecodeError as e:
-            print(json.dumps({"success": False, "error": f"Invalid JSON on stdin: {e}"}))
+            print(json.dumps({
+                "success": False,
+                "error": f"Invalid JSON on stdin: {e}",
+            }))
             sys.exit(1)
     else:
         print(json.dumps({
             "success": False,
-            "error": "No input: pass JSON as a command-line argument or via stdin"
+            "error": "No input: pass JSON as a command-line argument or via stdin",
         }))
         sys.exit(1)
-
+    
     action = request.get("action", "")
-
+    
     if action == "optimize_skill":
         try:
             result = optimize_skill(request)
             print(json.dumps(result))
-            sys.exit(0)
+            sys.exit(0 if result.get("success") else 1)
         except ImportError as e:
-            print(json.dumps({"success": False, "error": str(e)}))
+            print(json.dumps({
+                "success": False,
+                "error": str(e),
+            }))
             sys.exit(1)
         except Exception as e:
-            print(json.dumps({"success": False, "error": str(e)}))
+            print(json.dumps({
+                "success": False,
+                "error": f"Unexpected error: {str(e)}",
+            }))
             sys.exit(1)
     else:
-        print(json.dumps({"success": False, "error": f"Unknown action: {action}"}))
+        print(json.dumps({
+            "success": False,
+            "error": f"Unknown action: {action}",
+        }))
         sys.exit(1)
 
 

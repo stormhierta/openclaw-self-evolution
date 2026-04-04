@@ -18,6 +18,26 @@ import type { TrajectoryHookHandler } from "../hooks/trajectory-hooks.js";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 
+// ============================================================================
+// MiniMax API Types
+// ============================================================================
+
+interface MiniMaxResponse {
+  id?: string;
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+  }>;
+  base_resp?: {
+    status_code: number;
+    status_msg: string;
+  };
+  error?: {
+    message: string;
+  };
+}
+
 /**
  * TrajectoryLogger persists trajectory data from the in-memory buffer to SQLite.
  * 
@@ -30,8 +50,11 @@ export class TrajectoryLogger {
   private config: EvolutionConfig;
   private handler: TrajectoryHookHandler;
   private db: Database.Database | null = null;
-  private flushInterval: ReturnType<typeof setInterval> | null = null;
+  private flushInterval: ReturnType<typeof setTimeout> | null = null;
   private isInitialized = false;
+  private isFlushing = false;
+  private apiKey: string;
+  private apiBaseUrl: string;
 
   // Prepared statements for performance
   private insertTurnStmt: Database.Statement | null = null;
@@ -41,6 +64,8 @@ export class TrajectoryLogger {
   constructor(config: EvolutionConfig, handler: TrajectoryHookHandler) {
     this.config = config;
     this.handler = handler;
+    this.apiKey = process.env.MINIMAX_API_KEY ?? "";
+    this.apiBaseUrl = "https://api.minimax.io";
   }
 
   /**
@@ -49,6 +74,183 @@ export class TrajectoryLogger {
   private getDbPath(): string {
     return this.config.storage.trajectoryDbPath ?? 
            `${process.env.HOME ?? "."}/.openclaw/evolution/trajectories.db`;
+  }
+
+  /**
+   * Evaluate the outcome of a turn using LLM-as-judge.
+   * Returns a quality score between 0.0 and 1.0 based on actual task outcome.
+   * 
+   * Pattern from: reference/hermes-agent-self-evolution/evolution/core/external_importers.py
+   */
+  private async evaluateOutcome(
+    userMessage: string,
+    outcomeJson: Record<string, unknown>,
+    targetSkill?: string
+  ): Promise<number> {
+    // If no outcome data or no user message, return neutral score
+    if (!userMessage || !outcomeJson || typeof outcomeJson !== 'object' || Object.keys(outcomeJson).length === 0) {
+      return 0.5;
+    }
+
+    const outcomeStr = JSON.stringify(outcomeJson, null, 2);
+
+    const prompt = `Evaluate whether an AI agent successfully completed a task.
+
+## TASK
+${userMessage}
+
+## AGENT OUTPUT
+${outcomeStr}
+
+${targetSkill ? `## SKILL BEING EVALUATED\n${targetSkill}\n` : ""}
+
+## YOUR TASK
+Rate the quality of the agent's output on a scale from 0.0 to 1.0:
+- 1.0 = Task fully and correctly completed
+- 0.7-0.9 = Task mostly completed with minor issues
+- 0.4-0.6 = Task partially completed
+- 0.1-0.3 = Task attempted but mostly failed
+- 0.0 = Task not completed or completely wrong
+
+Return ONLY a JSON object: {"score": N, "reason": "brief explanation"}`;
+
+    try {
+      const response = await this.callMiniMax(prompt);
+      const parsed = JSON.parse(response) as { score?: number; reason?: string };
+      const score = typeof parsed.score === "number" ? parsed.score : parseFloat(String(parsed.score));
+      return isNaN(score) ? 0.5 : Math.max(0, Math.min(1, score));
+    } catch {
+      return 0.5; // neutral fallback
+    }
+  }
+
+  /**
+   * Call the MiniMax API.
+   * Pattern matches: src/evolution/fitness/llm-judge.ts callMiniMax()
+   */
+  private async callMiniMax(prompt: string): Promise<string> {
+    if (!this.apiKey) {
+      throw new Error("MINIMAX_API_KEY environment variable is not set");
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12_000); // 12s timeout
+
+    try {
+      const response = await fetch(
+        `${this.apiBaseUrl}/v1/text/chatcompletion_v2`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: "MiniMax-M2.7",
+            messages: [
+              {
+                role: "system",
+                content:
+                  "You are an expert AI task evaluator. Always return valid JSON with exact field names.",
+              },
+              {
+                role: "user",
+                content: prompt,
+              },
+            ],
+            temperature: 0.1, // Low temperature for consistent scoring
+            max_tokens: 500,
+          }),
+          signal: controller.signal,
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(
+          `MiniMax API error: ${response.status} ${response.statusText} - ${errorText}`
+        );
+      }
+
+      const data = (await response.json()) as MiniMaxResponse;
+
+      // Check MiniMax base_resp status_code
+      if (data.base_resp && data.base_resp.status_code !== 0) {
+        throw new Error(
+          `MiniMax API error: ${data.base_resp.status_msg} (code ${data.base_resp.status_code})`
+        );
+      }
+
+      if (data.error) {
+        throw new Error(`MiniMax API error: ${data.error.message}`);
+      }
+
+      const content = data.choices?.[0]?.message?.content;
+      if (!content) {
+        throw new Error("MiniMax API returned empty content");
+      }
+
+      return content;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /**
+   * Compute reward signal using fallback heuristic (token efficiency).
+   * Used when targetSkill is not set or LLM evaluation fails.
+   * 
+   * DEPRECATED: Use evaluateOutcome() for actual task outcome scoring.
+   */
+  private computeFallbackRewardSignal(turn: TurnRecordRow): number | undefined {
+    // Try to extract usage data from outcome_json
+    try {
+      const outcome = JSON.parse(turn.outcome_json) as { usage?: { input?: number; output?: number; total?: number } };
+      if (outcome.usage) {
+        const totalTokens = (outcome.usage.input ?? 0) + (outcome.usage.output ?? 0);
+        // Simple heuristic: reward efficient responses
+        return Math.max(0, 1 - (totalTokens / 10000));
+      }
+    } catch {
+      // Ignore parse errors
+    }
+
+    // Try to extract duration from outcome data
+    try {
+      const outcome = JSON.parse(turn.outcome_json) as { durationMs?: number; error?: string };
+      if (outcome.durationMs !== undefined && !outcome.error) {
+        return Math.max(0, 1 - (outcome.durationMs / 5000));
+      }
+    } catch {
+      // Ignore parse errors
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Compute reward signal for a turn.
+   * Uses LLM-as-judge when targetSkill is set, falls back to heuristic otherwise.
+   */
+  async computeRewardSignal(turn: TurnRecordRow): Promise<number | undefined> {
+    // Only use LLM evaluation when targetSkill is set (we're measuring skill performance)
+    // This controls costs - don't evaluate every single turn
+    if (turn.target_skill) {
+      try {
+        const outcomeJson = JSON.parse(turn.outcome_json) as Record<string, unknown>;
+        const score = await this.evaluateOutcome(
+          turn.user_message,
+          outcomeJson,
+          turn.target_skill
+        );
+        return score;
+      } catch {
+        // LLM evaluation failed, fall through to heuristic
+      }
+    }
+
+    // Fallback to heuristic when no target_skill or LLM call failed
+    return this.computeFallbackRewardSignal(turn);
   }
 
   /**
@@ -160,6 +362,11 @@ export class TrajectoryLogger {
    * Drains buffer from hook handler, writes to SQLite, returns count written.
    * Uses prepared statements for efficiency.
    * 
+   * Computes reward signals using LLM-as-judge for turns with target_skill set.
+   * 
+   * FIX 1: Snapshots turns before processing to avoid race condition where
+   * new turns added during async LLM calls get lost when clearing buffer.
+   * 
    * @returns Number of records written
    */
   async flush(): Promise<number> {
@@ -171,17 +378,37 @@ export class TrajectoryLogger {
       throw new Error("Database not initialized");
     }
 
-    // FIX 3: Get finalized turns (not in-progress buffer)
-    const turns = this.handler.getFinalizedTurns();
+    // FIX 1: Snapshot the current turns and episodes — only commit THESE
+    // This prevents race condition where turns added during await are lost
+    let turns = this.handler.getFinalizedTurns();
     const episodes = this.handler.getCompletedEpisodes();
 
     if (turns.length === 0 && episodes.length === 0) {
       return 0;
     }
 
+    // FIX 1: Track which specific turns we're committing (by ID)
+    const committedTurnIds = new Set(turns.map(t => t.id));
+    const committedEpisodeIds = new Set(episodes.map(e => e.id));
+
+    // Compute reward signals using LLM-as-judge for turns with target_skill
+    // This replaces the token-ratio heuristic with actual task outcome evaluation
+    turns = await Promise.all(
+      turns.map(async (turn) => {
+        // Only recompute if target_skill is set (cost control)
+        if (turn.target_skill) {
+          const reward = await this.computeRewardSignal(turn);
+          if (reward !== undefined) {
+            return { ...turn, reward_signal: reward };
+          }
+        }
+        return turn;
+      })
+    );
+
     let writtenCount = 0;
 
-    // FIX 5: Use a transaction for atomicity - any error rolls back all changes
+    // Use a transaction for atomicity - any error rolls back all changes
     const transaction = this.db.transaction(() => {
       // Insert turns
       for (const turn of turns) {
@@ -223,12 +450,12 @@ export class TrajectoryLogger {
     try {
       transaction();
       
-      // FIX 5: Only clear buffers AFTER successful transaction commit
-      this.handler.clearFinalizedTurns();
-      this.handler.clearCompletedEpisodes();
+      // FIX 1: Only remove the specific turns/episodes we committed (not any new ones added during await)
+      this.handler.removeFinalizedTurns(committedTurnIds);
+      this.handler.removeCompletedEpisodes(committedEpisodeIds);
     } catch (error) {
       console.error("[trajectory-logger] Transaction failed:", error);
-      // FIX 5: Buffers are NOT cleared - data is preserved for next flush attempt
+      // Buffers are NOT cleared - data is preserved for next flush attempt
       throw error;
     }
 
@@ -238,6 +465,9 @@ export class TrajectoryLogger {
   /**
    * Start periodic background flush.
    * 
+   * FIX 3: Uses self-scheduling setTimeout pattern with flush lock to prevent
+   * overlapping flush calls.
+   * 
    * @param intervalMs - Flush interval in milliseconds (default: 60000 = 1 minute)
    */
   startPeriodicFlush(intervalMs = 60000): void {
@@ -246,21 +476,31 @@ export class TrajectoryLogger {
       return;
     }
 
-    this.flushInterval = setInterval(async () => {
-      try {
-        const count = await this.flush();
-        if (count > 0) {
-          console.log(`[trajectory-logger] Periodic flush: ${count} records written`);
+    const scheduleNext = (): void => {
+      this.flushInterval = setTimeout(async () => {
+        if (!this.isFlushing) {
+          this.isFlushing = true;
+          try {
+            const count = await this.flush();
+            if (count > 0) {
+              console.log(`[trajectory-logger] Periodic flush: ${count} records written`);
+            }
+          } catch (error) {
+            console.error("[trajectory-logger] Periodic flush failed:", error);
+          } finally {
+            this.isFlushing = false;
+          }
         }
-      } catch (error) {
-        console.error("[trajectory-logger] Periodic flush failed:", error);
-      }
-    }, intervalMs);
+        scheduleNext(); // always schedule next, regardless of outcome
+      }, intervalMs);
 
-    // Ensure the interval doesn't prevent process exit
-    if (this.flushInterval.unref) {
-      this.flushInterval.unref();
-    }
+      // Ensure the timeout doesn't prevent process exit
+      if (this.flushInterval.unref) {
+        this.flushInterval.unref();
+      }
+    };
+
+    scheduleNext();
   }
 
   /**

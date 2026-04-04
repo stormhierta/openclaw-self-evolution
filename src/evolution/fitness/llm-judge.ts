@@ -50,14 +50,12 @@ interface MiniMaxResponse {
 
 /**
  * Raw scores returned by the LLM judge for a single test case.
- * Maps directly to rubric criterion names.
+ * Maps directly to rubric criterion names (snake_case).
  */
 interface LlmRawScores {
-  accuracy: number;
-  relevance: number;
-  completeness: number;
-  tool_selection: number;
-  output_quality: number;
+  correctness: number;
+  procedure_following: number;
+  conciseness: number;
 }
 
 // ============================================================================
@@ -95,12 +93,16 @@ export class LlmJudge {
   ): Promise<FitnessScore> {
     const rubric = this.rubricRegistry.getRubricForSkill(variant.skillName);
 
-    // Aggregate scores across all test cases
+    // Aggregate scores and feedback across all test cases
     const allScores: LlmRawScores[] = [];
+    const allFeedback: string[] = [];
 
     for (const testCase of testCases) {
-      const rawScores = await this.evaluateTestCase(variant, testCase, rubric);
-      allScores.push(rawScores);
+      const result = await this.evaluateTestCase(variant, testCase, rubric);
+      allScores.push(result.scores);
+      if (result.feedback && result.feedback.trim().length > 0) {
+        allFeedback.push(result.feedback);
+      }
     }
 
     // Average scores across test cases
@@ -112,9 +114,14 @@ export class LlmJudge {
     // Compute weighted overall score using rubric weights
     const overall = this.computeWeightedOverall(averagedScores, rubric);
 
+    // Aggregate feedback: pick feedback from the lowest-scoring test case
+    // (most specific area for improvement)
+    const feedback = this.aggregateFeedback(allScores, allFeedback);
+
     return {
       overall,
       components,
+      feedback,
       evaluatedAt: new Date(),
       method: "llm_judge",
       rawScores: averagedScores as unknown as Record<string, number>,
@@ -183,22 +190,26 @@ export class LlmJudge {
 
   /**
    * Evaluate a single test case using the MiniMax API.
+   * Returns scores and optional feedback.
    */
   private async evaluateTestCase(
     variant: SkillVariant,
     testCase: DatasetEntry,
     rubric: import("./rubrics.js").RubricDefinition
-  ): Promise<LlmRawScores> {
+  ): Promise<{ scores: LlmRawScores; feedback?: string }> {
     const prompt = this.buildEvaluationPrompt(variant, testCase, rubric);
 
     const response = await this.callMiniMax(prompt);
-    const scores = this.parseScoreResponse(response);
+    const result = this.parseScoreResponse(response);
 
-    return scores;
+    return result;
   }
 
   /**
    * Build the evaluation prompt for the LLM judge.
+   * Uses a two-step simulation approach:
+   * 1. Simulate: Imagine an agent following the skill instructions
+   * 2. Evaluate: Score the simulated outcome on correctness, procedure_following, conciseness
    */
   private buildEvaluationPrompt(
     variant: SkillVariant,
@@ -208,41 +219,38 @@ export class LlmJudge {
     const criteriaDescriptions = rubric.criteria
       .map(
         (c) =>
-          `- ${c.name} (weight: ${(c.weight * 100).toFixed(0)}%): ${c.description}`
+          `- ${c.name} (weight: ${(c.weight * 100).toFixed(0)}%): ${c.description}\n  Scoring: ${c.scoringGuidelines}`
       )
-      .join("\n");
+      .join("\n\n");
 
-    return `You are an expert evaluator judging whether a skill's instructions are likely to produce the correct output for a given test case.
+    return `You are evaluating whether a skill produces correct agent behavior.
 
-## SKILL TO EVALUATE
-Skill Name: ${variant.skillName}
-Generation: ${variant.generation}
-Content:
+## SKILL INSTRUCTIONS
 ${variant.content}
 
-## TEST CASE
+## TASK
 Input: ${testCase.input}
-Expected Output: ${testCase.expectedOutput}
 ${testCase.context ? `Context: ${JSON.stringify(testCase.context)}` : ""}
 
-## EVALUATION RUBRIC
-Score each criterion from 0 to ${rubric.maxScore} based on whether the skill's instructions would guide an agent to produce correct, high-quality output for this test case:
+## EXPECTED BEHAVIOR
+${testCase.expectedOutput}
 
+## EVALUATION
+
+Step 1 — Simulate: Briefly describe what an agent following these skill instructions would do for this task.
+
+Step 2 — Score the likely outcome:
+- correctness (0-100): Would the agent produce correct, accurate output?
+- procedure_following (0-100): Would the agent follow the skill's intended procedure?
+- conciseness (0-100): Would the response be appropriately concise?
+
+Step 3 — Provide specific, actionable feedback: What in the skill could be improved to better handle this task?
+
+## SCORING CRITERIA
 ${criteriaDescriptions}
 
-## YOUR TASK
-Evaluate whether this skill's instructions are likely to lead an agent to produce the expected output for this test case. Provide ONLY a JSON object with scores for each criterion. No explanation or text outside the JSON.
-
-Return this exact JSON structure (replace VALUE_HERE with your numeric scores):
-{
-  "accuracy": VALUE_HERE,
-  "relevance": VALUE_HERE,
-  "completeness": VALUE_HERE,
-  "tool_selection": VALUE_HERE,
-  "output_quality": VALUE_HERE
-}
-
-Score honestly based on whether the skill instructions would enable correct behavior, not on the skill content alone.`;
+Return ONLY this JSON (no other text):
+{"reasoning": "brief simulation of what the agent would do", "correctness": N, "procedure_following": N, "conciseness": N, "feedback": "one sentence of specific improvement suggestion"}`;
   }
 
   /**
@@ -311,24 +319,38 @@ Score honestly based on whether the skill instructions would enable correct beha
 
   /**
    * Parse the JSON score response from the LLM.
+   * Extracts scores and optional feedback.
    */
-  private parseScoreResponse(response: string): LlmRawScores {
+  private parseScoreResponse(response: string): { scores: LlmRawScores; feedback?: string } {
     // Extract JSON from response (handle markdown code blocks)
     const jsonMatch =
       response.match(/```(?:json)?\s*([\s\S]*?)```/) ||
       response.match(/(\{[\s\S]*\})/);
     const jsonStr = jsonMatch ? jsonMatch[1] : response;
 
-    const parsed = JSON.parse(jsonStr.trim()) as Partial<LlmRawScores>;
+    try {
+      const parsed = JSON.parse(jsonStr.trim()) as Partial<LlmRawScores & { feedback?: string; reasoning?: string }>;
 
-    // Validate and normalize scores to 0-100 range
-    return {
-      accuracy: this.clampScore(parsed.accuracy ?? 0),
-      relevance: this.clampScore(parsed.relevance ?? 0),
-      completeness: this.clampScore(parsed.completeness ?? 0),
-      tool_selection: this.clampScore(parsed.tool_selection ?? 0),
-      output_quality: this.clampScore(parsed.output_quality ?? 0),
-    };
+      // Validate and normalize scores to 0-100 range
+      const scores: LlmRawScores = {
+        correctness: this.clampScore(parsed.correctness ?? 0),
+        procedure_following: this.clampScore(parsed.procedure_following ?? 0),
+        conciseness: this.clampScore(parsed.conciseness ?? 0),
+      };
+
+      // Extract feedback if present
+      const feedback = typeof parsed.feedback === 'string' && parsed.feedback.trim().length > 0
+        ? parsed.feedback.trim()
+        : undefined;
+
+      return { scores, feedback };
+    } catch {
+      // Return safe fallback scores
+      return {
+        scores: { correctness: 50, procedure_following: 50, conciseness: 50 },
+        feedback: "Failed to parse evaluation response",
+      };
+    }
   }
 
   /**
@@ -346,56 +368,77 @@ Score honestly based on whether the skill instructions would enable correct beha
   private averageScores(allScores: LlmRawScores[]): LlmRawScores {
     if (allScores.length === 0) {
       return {
-        accuracy: 0,
-        relevance: 0,
-        completeness: 0,
-        tool_selection: 0,
-        output_quality: 0,
+        correctness: 0,
+        procedure_following: 0,
+        conciseness: 0,
       };
     }
 
     const sum = allScores.reduce(
       (acc, s) => ({
-        accuracy: acc.accuracy + s.accuracy,
-        relevance: acc.relevance + s.relevance,
-        completeness: acc.completeness + s.completeness,
-        tool_selection: acc.tool_selection + s.tool_selection,
-        output_quality: acc.output_quality + s.output_quality,
+        correctness: acc.correctness + s.correctness,
+        procedure_following: acc.procedure_following + s.procedure_following,
+        conciseness: acc.conciseness + s.conciseness,
       }),
-      { accuracy: 0, relevance: 0, completeness: 0, tool_selection: 0, output_quality: 0 }
+      { correctness: 0, procedure_following: 0, conciseness: 0 }
     );
 
     const count = allScores.length;
     return {
-      accuracy: sum.accuracy / count,
-      relevance: sum.relevance / count,
-      completeness: sum.completeness / count,
-      tool_selection: sum.tool_selection / count,
-      output_quality: sum.output_quality / count,
+      correctness: sum.correctness / count,
+      procedure_following: sum.procedure_following / count,
+      conciseness: sum.conciseness / count,
     };
+  }
+
+  /**
+   * Aggregate feedback from multiple test case evaluations.
+   * Returns feedback from the lowest-scoring test case (most specific area for improvement),
+   * or concatenates up to 3 feedbacks if no single low-scoring case stands out.
+   */
+  private aggregateFeedback(allScores: LlmRawScores[], allFeedback: string[]): string | undefined {
+    if (allFeedback.length === 0) {
+      return undefined;
+    }
+
+    if (allFeedback.length === 1) {
+      return allFeedback[0];
+    }
+
+    // Find the test case with the lowest average score (most problematic)
+    let minIndex = 0;
+    let minAvgScore = Infinity;
+
+    for (let i = 0; i < allScores.length; i++) {
+      const avg = (allScores[i].correctness + allScores[i].procedure_following + allScores[i].conciseness) / 3;
+      if (avg < minAvgScore) {
+        minAvgScore = avg;
+        minIndex = i;
+      }
+    }
+
+    // If we have feedback for the lowest-scoring case, use it
+    if (minIndex < allFeedback.length) {
+      return allFeedback[minIndex];
+    }
+
+    // Fallback: concatenate first 3 feedbacks
+    return allFeedback.slice(0, 3).join(" ");
   }
 
   /**
    * Map rubric raw scores to FitnessComponents.
    * 
-   * FitnessComponents (src/types.ts lines 150-157):
-   * - correctness: maps from accuracy
-   * - formatAdherence: maps from output_quality
-   * - efficiency: maps from completeness
-   * - robustness: maps from relevance
-   * - clarity: maps from tool_selection
-   * 
-   * Note: This mapping is approximate since rubric criteria and
-   * FitnessComponents have different semantic scopes. The rubric criteria
-   * are more directly relevant to the LLM judge's evaluation.
+   * Maps snake_case rubric criterion names to camelCase FitnessComponents:
+   * - correctness -> correctness
+   * - procedure_following -> procedureFollowing
+   * - conciseness -> conciseness
    */
   private toFitnessComponents(scores: LlmRawScores): FitnessComponents {
     return {
-      correctness: scores.accuracy,
-      formatAdherence: scores.output_quality,
-      efficiency: scores.completeness,
-      robustness: scores.relevance,
-      clarity: scores.tool_selection,
+      correctness: scores.correctness,
+      procedureFollowing: scores.procedure_following,
+      conciseness: scores.conciseness,
     };
   }
 
@@ -412,13 +455,11 @@ Score honestly based on whether the skill instructions would enable correct beha
       weightMap.set(criterion.name, criterion.weight);
     }
 
-    // Compute weighted sum
+    // Compute weighted sum (weights sum to 1.0)
     const overall =
-      (scores.accuracy * (weightMap.get("accuracy") ?? 0)) +
-      (scores.relevance * (weightMap.get("relevance") ?? 0)) +
-      (scores.completeness * (weightMap.get("completeness") ?? 0)) +
-      (scores.tool_selection * (weightMap.get("tool_selection") ?? 0)) +
-      (scores.output_quality * (weightMap.get("output_quality") ?? 0));
+      (scores.correctness * (weightMap.get("correctness") ?? 0.50)) +
+      (scores.procedure_following * (weightMap.get("procedure_following") ?? 0.30)) +
+      (scores.conciseness * (weightMap.get("conciseness") ?? 0.20));
 
     return Math.round(overall * 100) / 100;
   }

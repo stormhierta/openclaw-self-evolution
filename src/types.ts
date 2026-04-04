@@ -232,18 +232,18 @@ export interface FitnessScore {
   /** 0-100 scale (weighted sum of rubric criterion scores) */
   overall: number;
   components: FitnessComponents;
+  /** Actionable feedback for GEPA's reflective analysis */
+  feedback?: string;
   evaluatedAt: Date;
   method: 'llm_judge' | 'automated_test' | 'human_review';
   rawScores: Record<string, number>;
 }
 
-/** Component scores for fitness evaluation */
+/** Component scores for fitness evaluation (outcome-focused, matching Hermes) */
 export interface FitnessComponents {
-  correctness: number;
-  formatAdherence: number;
-  efficiency: number;
-  robustness: number;
-  clarity: number;
+  correctness: number;          // 0-100: Did the agent produce correct output?
+  procedureFollowing: number;   // 0-100: Did it follow the skill's procedure?
+  conciseness: number;          // 0-100: Was it appropriately concise?
 }
 
 // ============================================================================

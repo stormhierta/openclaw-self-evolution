@@ -77,84 +77,53 @@ export class RubricRegistry {
    * Build the default general-purpose rubric for skill evaluation.
    * 
    * Criteria (weights sum to 1.0):
-   * - accuracy: 0.25 - Does the skill produce correct outputs?
-   * - relevance: 0.20 - Does the output address the user's intent?
-   * - completeness: 0.20 - Does the skill fully address the request?
-   * - tool_selection: 0.20 - Does the skill use appropriate tools?
-   * - output_quality: 0.15 - Is the output well-structured and clear?
+   * - correctness: 0.50 - Would an agent following these instructions produce correct output?
+   * - procedure_following: 0.30 - Does the skill guide the agent through the right procedure?
+   * - conciseness: 0.20 - Would the skill lead to appropriately concise responses?
    */
   private buildDefaultRubric(): RubricDefinition {
     return {
       id: "default-skill-eval",
       name: "Default Skill Evaluation Rubric",
       description:
-        "General-purpose rubric for evaluating any skill's response quality across five dimensions.",
+        "Outcome-focused rubric for evaluating whether skill instructions lead to correct, well-structured task completion.",
       maxScore: 100,
       criteria: [
         {
-          name: "accuracy",
+          name: "correctness",
           description:
-            "Measures correctness and factuality of the skill's output. " +
-            "High accuracy means the output is factually correct, logically sound, and free from errors.",
-          weight: 0.25,
+            "Would an agent following these instructions produce correct, accurate output for the task?",
+          weight: 0.50,
           scoringGuidelines:
-            "Score 90-100: Output is entirely correct with no factual or logical errors. " +
-            "Score 70-89: Minor errors that don't significantly impact the result. " +
-            "Score 50-69: Moderate errors affecting some aspects of correctness. " +
-            "Score 25-49: Significant errors or frequent mistakes. " +
-            "Score 0-24: Mostly or entirely incorrect.",
+            "Score 90-100: Instructions would guide the agent to entirely correct output with no factual or logical errors. " +
+            "Score 70-89: Instructions are mostly correct with minor issues that don't significantly impact results. " +
+            "Score 50-69: Instructions have moderate errors affecting some aspects of correctness. " +
+            "Score 25-49: Instructions contain significant errors or would lead to frequent mistakes. " +
+            "Score 0-24: Instructions are mostly or entirely incorrect.",
         },
         {
-          name: "relevance",
+          name: "procedure_following",
           description:
-            "Measures how well the output addresses the user's actual intent and request. " +
-            "High relevance means the skill understood what was being asked.",
+            "Does the skill guide the agent through the right procedure or steps to complete the task?",
+          weight: 0.30,
+          scoringGuidelines:
+            "Score 90-100: Instructions guide the agent through an optimal, well-structured procedure. " +
+            "Score 70-89: Procedure is mostly correct with minor inefficiencies or ordering issues. " +
+            "Score 50-69: Procedure has notable gaps or suboptimal ordering but would still work. " +
+            "Score 25-49: Procedure is significantly flawed or missing critical steps. " +
+            "Score 0-24: No clear procedure or completely wrong approach.",
+        },
+        {
+          name: "conciseness",
+          description:
+            "Would the skill lead to appropriately concise responses (not verbose, not missing critical info)?",
           weight: 0.20,
           scoringGuidelines:
-            "Score 90-100: Perfectly relevant, directly addresses the user's core intent. " +
-            "Score 70-89: Mostly relevant with minor tangential elements. " +
-            "Score 50-69: Partially relevant, misses some key aspects. " +
-            "Score 25-49: Low relevance, addresses something different from what was asked. " +
-            "Score 0-24: Completely irrelevant to the user query.",
-        },
-        {
-          name: "completeness",
-          description:
-            "Measures whether the skill fully addressed all parts of the request. " +
-            "High completeness means no important aspects were omitted.",
-          weight: 0.20,
-          scoringGuidelines:
-            "Score 90-100: All parts of the request are thoroughly addressed. " +
-            "Score 70-89: Most parts addressed, minor omissions. " +
-            "Score 50-69: Several parts missing or incomplete. " +
-            "Score 25-49: Significant portions of the request not addressed. " +
-            "Score 0-24: Barely addresses the request at all.",
-        },
-        {
-          name: "tool_selection",
-          description:
-            "Measures appropriateness of tool/function selection and usage. " +
-            "High scores indicate the skill chose the right tools and used them correctly.",
-          weight: 0.20,
-          scoringGuidelines:
-            "Score 90-100: Optimal tool selection with perfect usage. " +
-            "Score 70-89: Good tool selection with minor usage issues. " +
-            "Score 50-69: Reasonable tools chosen but with notable misuse. " +
-            "Score 25-49: Poor tool selection or significant misuse. " +
-            "Score 0-24: Completely wrong or no tools used when needed.",
-        },
-        {
-          name: "output_quality",
-          description:
-            "Measures overall presentation, structure, and clarity of the output. " +
-            "High quality means well-organized, clear, and easy to understand.",
-          weight: 0.15,
-          scoringGuidelines:
-            "Score 90-100: Excellent structure, clear, professional. " +
-            "Score 70-89: Good quality with minor presentation issues. " +
-            "Score 50-69: Adequate but poorly organized or unclear in places. " +
-            "Score 25-49: Low quality, confusing or badly structured. " +
-            "Score 0-24: Incomprehensible output.",
+            "Score 90-100: Instructions would produce appropriately concise, focused responses with all critical info. " +
+            "Score 70-89: Minor verbosity or slight omissions, but generally well-balanced. " +
+            "Score 50-69: Noticeably verbose or occasionally missing important details. " +
+            "Score 25-49: Very verbose or frequently missing critical information. " +
+            "Score 0-24: Either extremely verbose rambling or severely incomplete responses.",
         },
       ],
     };
