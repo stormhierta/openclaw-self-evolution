@@ -37,6 +37,7 @@ import { PrBuilder } from "./deployment/pr-builder.js";
 import { ReviewQueue } from "./deployment/review-queue.js";
 import { TrajectoryLogger } from "./collection/trajectory-logger.js";
 import { EvolutionTrigger } from "./automation/evolution-trigger.js";
+import { EvolutionScheduler } from "./automation/scheduler.js";
 import { SessionMiner } from "./collection/session-miner.js";
 import { RubricRegistry } from "./evolution/fitness/rubrics.js";
 import { LlmJudge } from "./evolution/fitness/llm-judge.js";
@@ -75,6 +76,8 @@ let prBuilder: PrBuilder | null = null;
 let reviewQueue: ReviewQueue | null = null;
 // P3-A: Self-triggered evolution instance
 let evolutionTrigger: EvolutionTrigger | null = null;
+// P3-C: Evolution scheduler for automated background evolution
+let evolutionScheduler: EvolutionScheduler | null = null;
 
 /**
  * Get the plugin configuration (for internal use)
@@ -109,6 +112,13 @@ export function getOutcomeLabeler(): OutcomeLabeler | null {
  */
 export function getEvolutionTrigger(): EvolutionTrigger | null {
   return evolutionTrigger;
+}
+
+/**
+ * P3-C: Get the evolution scheduler instance (for testing/internal use)
+ */
+export function getScheduler(): EvolutionScheduler | null {
+  return evolutionScheduler;
 }
 
 
@@ -1012,6 +1022,54 @@ function createBenchmarkRunTool(config: EvolutionConfig): AnyAgentTool {
 }
 
 /**
+ * Factory for run_scheduler_cycle tool
+ * P3-C: Manually trigger one auto-evolution scheduler cycle
+ * Source: matching bundled plugin firecrawl tool pattern
+ */
+function createRunSchedulerCycleTool(_config: EvolutionConfig): AnyAgentTool {
+  return {
+    name: "run_scheduler_cycle",
+    label: "Run Scheduler Cycle",
+    description: "Manually trigger one auto-evolution scheduler cycle: label trajectories, check skill performance, trigger evolution for underperforming skills",
+    parameters: {
+      type: "object",
+      properties: {},
+    },
+    execute: async (_toolCallId: string, _args: Record<string, unknown>) => {
+      try {
+        if (!evolutionScheduler) {
+          return jsonResult({
+            success: false,
+            error: "EvolutionScheduler not initialized",
+            result: null,
+          });
+        }
+
+        const result = await evolutionScheduler.runCycle();
+
+        return jsonResult({
+          success: true,
+          result: {
+            newLabels: result.newLabels,
+            skillsNeedingEvolution: result.skillsNeedingEvolution,
+            skillsTriggered: result.skillsTriggered,
+            evolutionRunIds: result.evolutionRunIds,
+            prIds: result.prIds,
+            errors: result.errors,
+          },
+        });
+      } catch (err) {
+        return jsonResult({
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          result: null,
+        });
+      }
+    },
+  };
+}
+
+/**
  * Factory for label_trajectories tool
  * P3-B: Label recent trajectory turns with outcome quality scores for RL training
  * Source: matching bundled plugin firecrawl tool pattern
@@ -1329,6 +1387,30 @@ async function register(api: OpenClawPluginApi): Promise<void> {
   evolutionTrigger = new EvolutionTrigger(pluginConfig);
   logger.info("[self-evolution] Evolution trigger initialized for self-triggered evolution");
 
+  // P3-C: Initialize and start evolution scheduler for automated background evolution
+  // Only start if autoRun is explicitly true in config (default is false)
+  if (datasetManager && prBuilder && outcomeLabeler && evolutionTrigger) {
+    evolutionScheduler = new EvolutionScheduler(
+      pluginConfig,
+      evolutionTrigger,
+      outcomeLabeler,
+      prBuilder,
+      datasetManager
+    );
+    
+    if (pluginConfig.evolution.autoRun === true) {
+      evolutionScheduler.start({
+        enabled: true,
+        intervalMs: 1_800_000, // 30 minutes
+        minNewTurnsToTrigger: 20,
+        maxSkillsPerCycle: 1,
+      });
+      logger.info("[self-evolution] Evolution scheduler started (autoRun=true)");
+    } else {
+      logger.info("[self-evolution] Evolution scheduler initialized but not started (autoRun=false)");
+    }
+  }
+
   // Register trajectory hooks
   if (pluginConfig.trajectory.enabled) {
     logger.info("[self-evolution] Registering trajectory hooks");
@@ -1394,6 +1476,10 @@ async function register(api: OpenClawPluginApi): Promise<void> {
 
   api.registerTool(createLabelTrajectoriesTool(pluginConfig), {
     name: "label_trajectories",
+  });
+
+  api.registerTool(createRunSchedulerCycleTool(pluginConfig), {
+    name: "run_scheduler_cycle",
   });
 
   // Register CLI commands
