@@ -27,3 +27,4 @@ Thumbs.db
 # TypeScript build info
 *.tsbuildinfo
 /reference/hermes-agent-self-evolution/
+coverage/
