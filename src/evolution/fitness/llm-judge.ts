@@ -97,11 +97,13 @@ export class LlmJudge {
    * 
    * @param variant - The SkillVariant to evaluate (from src/types.ts lines 104-113)
    * @param testCases - Array of DatasetEntry test cases (from src/types.ts lines 245-255)
+   * @param maxSizeBytes - Maximum allowed skill size in bytes (default: 10KB)
    * @returns Promise resolving to a FitnessScore
    */
   async scoreVariant(
     variant: SkillVariant,
-    testCases: DatasetEntry[]
+    testCases: DatasetEntry[],
+    maxSizeBytes: number = 10 * 1024
   ): Promise<FitnessScore> {
     const rubric = this.rubricRegistry.getRubricForSkill(variant.skillName);
 
@@ -124,7 +126,12 @@ export class LlmJudge {
     const components = this.toFitnessComponents(averagedScores);
 
     // Compute weighted overall score using rubric weights
-    const overall = this.computeWeightedOverall(averagedScores, rubric);
+    let overall = this.computeWeightedOverall(averagedScores, rubric);
+
+    // Apply length penalty
+    const lengthPenalty = this.computeLengthPenalty(variant.content, maxSizeBytes);
+    components.lengthPenalty = lengthPenalty;
+    overall = Math.max(0, overall - lengthPenalty * 100);
 
     // Aggregate feedback: pick feedback from the lowest-scoring test case
     // (most specific area for improvement)
@@ -330,18 +337,23 @@ Return ONLY this JSON (no other text):
   }
 
   /**
-   * Parse the JSON score response from the LLM.
-   * Extracts scores and optional feedback.
+   * Parse the JSON score response from the LLM using brace-depth counting.
+   * Handles nested objects and strings with escaped quotes correctly.
+   * Based on Hermes's _parse_scoring_json() approach.
    */
   private parseScoreResponse(response: string): { scores: LlmRawScores; feedback?: string } {
-    // Extract JSON from response (handle markdown code blocks)
-    const jsonMatch =
-      response.match(/```(?:json)?\s*([\s\S]*?)```/) ||
-      response.match(/(\{[\s\S]*\})/);
-    const jsonStr = jsonMatch ? jsonMatch[1] : response;
+    const jsonStr = this.extractBalancedJson(response);
+
+    if (!jsonStr) {
+      // Return safe fallback scores
+      return {
+        scores: { correctness: 50, procedure_following: 50, conciseness: 50 },
+        feedback: "Failed to parse evaluation response",
+      };
+    }
 
     try {
-      const parsed = JSON.parse(jsonStr.trim()) as Partial<LlmRawScores & { feedback?: string; reasoning?: string }>;
+      const parsed = JSON.parse(jsonStr) as Partial<LlmRawScores & { feedback?: string; reasoning?: string }>;
 
       // Validate and normalize scores to 0-100 range
       const scores: LlmRawScores = {
@@ -474,5 +486,84 @@ Return ONLY this JSON (no other text):
       (scores.conciseness * (weightMap.get("conciseness") ?? 0.20));
 
     return Math.round(overall * 100) / 100;
+  }
+
+  /**
+   * Extract a balanced JSON object from text using brace-depth counting.
+   * Handles nested objects and strings with escaped quotes correctly.
+   * Returns null if no valid JSON object found.
+   */
+  private extractBalancedJson(text: string): string | null {
+    if (!text) return null;
+
+    // Fast path: try direct JSON parse
+    try {
+      const result = JSON.parse(text);
+      if (typeof result === 'object' && result !== null) {
+        return text;
+      }
+    } catch {
+      // Continue to slow path
+    }
+
+    // Slow path: find balanced {...} block using brace counting
+    const start = text.indexOf('{');
+    if (start === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escapeNext = false;
+
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+
+      if (ch === '\\' && inString) {
+        escapeNext = true;
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) {
+        continue;
+      }
+
+      if (ch === '{') {
+        depth += 1;
+      } else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          try {
+            const jsonBlob = text.slice(start, i + 1);
+            JSON.parse(jsonBlob); // Validate
+            return jsonBlob;
+          } catch {
+            return null;
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Compute length penalty based on skill content size relative to maxSizeBytes.
+   * Linear ramp: 0.0 at 90% ratio to 0.3 at 100%+ ratio.
+   */
+  private computeLengthPenalty(skillContent: string, maxSizeBytes: number): number {
+    const sizeBytes = Buffer.byteLength(skillContent, 'utf8');
+    const ratio = sizeBytes / maxSizeBytes;
+    if (ratio < 0.9) return 0;
+    // Linear ramp: 0.0 at 90% to 0.3 at 100%+
+    return Math.min(0.3, (ratio - 0.9) / 0.1 * 0.3);
   }
 }

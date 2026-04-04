@@ -16,6 +16,7 @@ import Database from "better-sqlite3";
 import type { EvolutionConfig, TurnRecordRow, EpisodeRecordRow, TrajectoryFilter, LlmConfig } from "../types.js";
 import type { TrajectoryHookHandler } from "../hooks/trajectory-hooks.js";
 import type { OutcomeLabeler } from "./outcome-labeler.js";
+import { containsSecretInAny } from "./secret-detector.js";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 
@@ -427,8 +428,29 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation"}`;
 
     // FIX 1: Snapshot the current turns and episodes — only commit THESE
     // This prevents race condition where turns added during operations are lost
-    const turns = this.handler.getFinalizedTurns();
+    const rawTurns = this.handler.getFinalizedTurns();
     const episodes = this.handler.getCompletedEpisodes();
+
+    // Filter out turns containing secrets before processing
+    const turns: typeof rawTurns = [];
+    for (const turn of rawTurns) {
+      // Check all text fields for secrets
+      const hasSecret = containsSecretInAny(
+        turn.user_message,
+        turn.system_prompt,
+        turn.context_json,
+        turn.action_json,
+        turn.outcome_json,
+        turn.skills_used,
+        turn.target_skill
+      );
+      
+      if (hasSecret) {
+        console.warn(`[trajectory-logger] Skipping turn ${turn.id} - potential secret detected`);
+        continue;
+      }
+      turns.push(turn);
+    }
 
     if (turns.length === 0 && episodes.length === 0) {
       return 0;

@@ -272,7 +272,7 @@ export interface EvolutionProgress {
 
 /** Fitness score for a skill variant */
 export interface FitnessScore {
-  /** 0-100 scale (weighted sum of rubric criterion scores) */
+  /** 0-100 scale (weighted sum of rubric criterion scores, minus lengthPenalty*100 if applicable) */
   overall: number;
   components: FitnessComponents;
   /** Actionable feedback for GEPA's reflective analysis */
@@ -287,6 +287,8 @@ export interface FitnessComponents {
   correctness: number;          // 0-100: Did the agent produce correct output?
   procedureFollowing: number;   // 0-100: Did it follow the skill's procedure?
   conciseness: number;          // 0-100: Was it appropriately concise?
+  /** 0.0-0.3 penalty subtracted from overall when skill exceeds 90% of max size (Hermes parity) */
+  lengthPenalty?: number;
 }
 
 // ============================================================================

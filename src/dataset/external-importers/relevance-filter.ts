@@ -10,6 +10,7 @@
 
 import type { ParsedSession } from "./base.js";
 import type { EvolutionConfig, LlmConfig } from "../../types.js";
+import { containsSecretInAny } from "../../collection/secret-detector.js";
 
 /**
  * Relevance score result from LLM evaluation
@@ -182,6 +183,11 @@ export class RelevanceFilter {
     skillName: string,
     skillDesc: string
   ): string {
+    // Include assistant response only if non-empty
+    const assistantResponseSection = session.assistantResponse?.trim()
+      ? `\n## ASSISTANT RESPONSE\n${session.assistantResponse.slice(0, 1000)}`
+      : "";
+
     return `You are evaluating whether a user message is relevant to a specific agent skill.
 
 ## SKILL NAME
@@ -191,10 +197,7 @@ ${skillName}
 ${skillDesc}
 
 ## USER MESSAGE
-${session.taskInput.slice(0, 1000)}
-
-## ASSISTANT RESPONSE (may be empty)
-${(session.assistantResponse || "").slice(0, 1000)}
+${session.taskInput.slice(0, 1000)}${assistantResponseSection}
 
 ## TASK
 Determine if this user message is relevant to the skill above. If relevant, provide:
@@ -339,9 +342,9 @@ Return ONLY this JSON:
     skillText: string,
     maxExamples = 50
   ): Promise<Array<ParsedSession & RelevanceScore>> {
-    // Stage 0: Drop messages missing required fields
+    // Stage 0: Drop messages missing required fields or containing secrets
     const validSessions = sessions.filter(
-      s => s.taskInput && s.source
+      s => s.taskInput && s.source && !containsSecretInAny(s.taskInput, s.assistantResponse)
     );
 
     // Stage 1: Cheap heuristic pre-filter
