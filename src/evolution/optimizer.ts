@@ -17,8 +17,9 @@
 
 import Database from "better-sqlite3";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import type {
   EvolutionConfig,
@@ -215,6 +216,15 @@ export class EvolutionOptimizer {
           populationSize,
           targetScore: options?.targetScore,
         }
+      );
+
+      // Step 5b: Persist evolution output to disk
+      await this.persistEvolutionOutput(
+        skillName,
+        runId,
+        skillContent,
+        evolutionResult,
+        now
       );
 
       // Step 6: Store result in run record
@@ -597,6 +607,74 @@ export class EvolutionOptimizer {
   private resolveSkillPath(skillName: string): string {
     const skillsDir = `${process.env.HOME ?? "."}/.openclaw/skills`;
     return join(skillsDir, skillName, "SKILL.md");
+  }
+
+  /**
+   * Persist evolution output to disk after a successful evolution run.
+   * Writes baseline.md, evolved.md, and metrics.json to output/<skillName>/<timestamp>/
+   *
+   * @param skillName - Name of the skill (will be sanitized for filesystem)
+   * @param runId - The evolution run ID
+   * @param baselineContent - The original skill content before evolution
+   * @param evolutionResult - The result from evolver.evolveSkill()
+   * @param startedAt - When the evolution run started
+   */
+  private async persistEvolutionOutput(
+    skillName: string,
+    runId: string,
+    baselineContent: string,
+    evolutionResult: EvolutionResult,
+    startedAt: Date
+  ): Promise<void> {
+    try {
+      // Sanitize skill name for filesystem (replace spaces and special chars with -)
+      const sanitizedSkillName = skillName
+        .replace(/[^a-zA-Z0-9_-]/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-|-$/g, "");
+
+      // Create sortable timestamp (replace colons with hyphens for filesystem compatibility)
+      const timestamp = startedAt.toISOString().replace(/:/g, "-");
+
+      // Resolve output directory (use config.outputDir if available, else default to output/)
+      const outputRoot = this.config.storage?.datasetPath
+        ? dirname(this.config.storage.datasetPath)
+        : join(process.cwd(), "output");
+      const outputDir = join(outputRoot, sanitizedSkillName, timestamp);
+
+      // Create directory recursively
+      await mkdir(outputDir, { recursive: true });
+
+      // Write baseline.md
+      const baselinePath = join(outputDir, "baseline.md");
+      await writeFile(baselinePath, baselineContent, "utf-8");
+
+      // Write evolved.md (best variant content)
+      const evolvedPath = join(outputDir, "evolved.md");
+      await writeFile(evolvedPath, evolutionResult.bestVariant.content, "utf-8");
+
+      // Write metrics.json
+      const metrics = {
+        skillName,
+        runId,
+        startedAt: startedAt.toISOString(),
+        completedAt: evolutionResult.completedAt.toISOString(),
+        baselineFitnessScore: evolutionResult.baselineScore.overall,
+        bestFitnessScore: evolutionResult.bestScore.overall,
+        improvement: evolutionResult.improvement,
+        generationsCompleted: evolutionResult.generationsCompleted,
+        totalVariantsEvaluated: evolutionResult.totalVariantsEvaluated,
+        stoppedEarly: evolutionResult.stoppedEarly,
+      };
+      const metricsPath = join(outputDir, "metrics.json");
+      await writeFile(metricsPath, JSON.stringify(metrics, null, 2), "utf-8");
+
+      console.log(`[optimizer] Evolution output persisted to ${outputDir}`);
+    } catch (error) {
+      // Log warning but do NOT throw — persistence failure should not break evolution result
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[optimizer] Failed to persist evolution output: ${message}`);
+    }
   }
 
   /**
