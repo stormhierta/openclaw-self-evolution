@@ -432,6 +432,7 @@ export class GEPAEvolver {
       })),
       config: {
         maxIterations: iterations,
+        llm: { dspy: this.config.llm?.dspy ?? {} }
       },
     });
 
@@ -762,6 +763,9 @@ export class GEPAEvolver {
           expectedOutput: tc.expectedOutput,
           context: tc.context,
         })),
+        config: {
+          llm: { dspy: this.config.llm?.dspy ?? {} }
+        }
       });
       if (bridgeResult.success && bridgeResult.optimizedContent && bridgeResult.optimizedScore !== undefined) {
         // DSPy returns score on 0-1 scale, LLM judge uses 0-100 scale

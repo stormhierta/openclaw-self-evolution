@@ -55,6 +55,39 @@ export interface StorageConfig {
   evolutionLogPath?: string;
 }
 
+/**
+ * LLM configuration for a single component.
+ * All fields are optional; defaults maintain backward compatibility.
+ */
+export interface LlmConfig {
+  /** Model name (default: "MiniMax-M2.7") */
+  model?: string;
+  /** API base URL (default: "https://api.minimax.io") */
+  apiBase?: string;
+  /** Environment variable name for API key (default: "MINIMAX_API_KEY") */
+  apiKeyEnvVar?: string;
+  /** Temperature for generation (default: component-specific) */
+  temperature?: number;
+  /** Max tokens for generation (default: component-specific) */
+  maxTokens?: number;
+}
+
+/**
+ * Per-component LLM configuration for the evolution pipeline.
+ */
+export interface EvolutionLlmConfig {
+  /** LLM judge for fitness scoring (src/evolution/fitness/llm-judge.ts) */
+  judge?: LlmConfig;
+  /** Synthetic test case generator (src/dataset/synthetic-generator.ts) */
+  generator?: LlmConfig;
+  /** Trajectory outcome labeler (src/collection/outcome-labeler.ts) */
+  labeler?: LlmConfig;
+  /** Relevance filter for external importers (src/dataset/external-importers/relevance-filter.ts) */
+  relevance?: LlmConfig;
+  /** DSPy bridge configuration (python/dspy_bridge.py) */
+  dspy?: LlmConfig;
+}
+
 /** Main plugin configuration interface */
 export interface EvolutionConfig {
   enabled: boolean;
@@ -64,6 +97,8 @@ export interface EvolutionConfig {
   sizeLimits?: SizeLimitsConfig;
   retentionDays: number;
   storage: StorageConfig;
+  /** Per-component LLM configuration (optional, defaults to MiniMax-M2.7) */
+  llm?: EvolutionLlmConfig;
 }
 
 // ============================================================================

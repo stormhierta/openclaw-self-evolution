@@ -196,6 +196,67 @@
             "description": "Path to evolution run logs"
           }
         }
+      },
+      "llm": {
+        "type": "object",
+        "description": "Per-component LLM configuration",
+        "additionalProperties": false,
+        "properties": {
+          "judge": {
+            "$ref": "#/configSchema/definitions/llmConfig",
+            "description": "LLM configuration for fitness scoring (llm-judge.ts)"
+          },
+          "generator": {
+            "$ref": "#/configSchema/definitions/llmConfig",
+            "description": "LLM configuration for synthetic test case generation"
+          },
+          "labeler": {
+            "$ref": "#/configSchema/definitions/llmConfig",
+            "description": "LLM configuration for trajectory outcome labeling"
+          },
+          "relevance": {
+            "$ref": "#/configSchema/definitions/llmConfig",
+            "description": "LLM configuration for relevance filtering in importers"
+          },
+          "dspy": {
+            "$ref": "#/configSchema/definitions/llmConfig",
+            "description": "LLM configuration for DSPy bridge"
+          }
+        }
+      }
+    },
+    "definitions": {
+      "llmConfig": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Model name (default: MiniMax-M2.7)",
+            "default": "MiniMax-M2.7"
+          },
+          "apiBase": {
+            "type": "string",
+            "description": "API base URL (default: https://api.minimax.io)",
+            "default": "https://api.minimax.io"
+          },
+          "apiKeyEnvVar": {
+            "type": "string",
+            "description": "Environment variable name for API key (default: MINIMAX_API_KEY)",
+            "default": "MINIMAX_API_KEY"
+          },
+          "temperature": {
+            "type": "number",
+            "description": "Temperature for generation",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "maxTokens": {
+            "type": "integer",
+            "description": "Maximum tokens to generate",
+            "minimum": 1
+          }
+        }
       }
     }
   }

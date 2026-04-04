@@ -58,6 +58,28 @@ export const StorageConfigSchema = z.object({
   evolutionLogPath: z.string().optional(),
 }).strict();
 
+/**
+ * LLM configuration schema for a single component
+ */
+export const LlmConfigSchema = z.object({
+  model: z.string().optional(),
+  apiBase: z.string().optional(),
+  apiKeyEnvVar: z.string().optional(),
+  temperature: z.number().optional(),
+  maxTokens: z.number().int().optional(),
+}).strict();
+
+/**
+ * Per-component LLM configuration schema
+ */
+export const EvolutionLlmConfigSchema = z.object({
+  judge: LlmConfigSchema.optional(),
+  generator: LlmConfigSchema.optional(),
+  labeler: LlmConfigSchema.optional(),
+  relevance: LlmConfigSchema.optional(),
+  dspy: LlmConfigSchema.optional(),
+}).strict();
+
 // ============================================================================
 // Main Config Schema
 // ============================================================================
@@ -79,6 +101,7 @@ export const EvolutionConfigSchema = z.object({
   sizeLimits: SizeLimitsSchema.optional(),
   retentionDays: z.number().int().min(1).default(90),
   storage: StorageConfigSchema.default({}),
+  llm: EvolutionLlmConfigSchema.optional(),
 }).strict();
 
 // ============================================================================
@@ -99,6 +122,12 @@ export type ParsedStorageConfig = z.infer<typeof StorageConfigSchema>;
 
 /** Inferred type for parsed evolution config */
 export type ParsedEvolutionConfig = z.infer<typeof EvolutionConfigSchema>;
+
+/** Inferred type for parsed LLM config */
+export type ParsedLlmConfig = z.infer<typeof LlmConfigSchema>;
+
+/** Inferred type for parsed evolution LLM config */
+export type ParsedEvolutionLlmConfig = z.infer<typeof EvolutionLlmConfigSchema>;
 
 // ============================================================================
 // Config Parsing Functions

@@ -154,19 +154,23 @@ def _build_lm(config: dict):
     """Build a DSPy LM wrapper for the MiniMax OpenAI-compatible endpoint."""
     dspy = _get_dspy()
     
-    model = config.get("model", "MiniMax-M2.7")
-    api_key = config.get("apiKey") or os.environ.get("MINIMAX_API_KEY", "")
-    api_base = config.get("apiBase", "https://api.minimax.io/v1")
+    # Check for nested dspy LLM config first
+    llm_config = config.get("llm", {}).get("dspy", {})
+    
+    model = llm_config.get("model", config.get("model", "MiniMax-M2.7"))
+    api_key_env = llm_config.get("apiKeyEnvVar", "MINIMAX_API_KEY")
+    api_key = llm_config.get("apiKey") or os.environ.get(api_key_env, os.environ.get("MINIMAX_API_KEY", ""))
+    api_base = llm_config.get("apiBase", config.get("apiBase", "https://api.minimax.io/v1"))
     
     if not api_key:
-        raise ValueError("No API key provided: set config.apiKey or MINIMAX_API_KEY env var")
+        raise ValueError("No API key provided: set config.llm.dspy.apiKey, config.llm.dspy.apiKeyEnvVar, or MINIMAX_API_KEY env var")
     
     return dspy.LM(
         model=f"openai/{model}",
         api_key=api_key,
         api_base=api_base,
-        temperature=config.get("temperature", 0.7),
-        max_tokens=config.get("maxTokens", 4096),
+        temperature=llm_config.get("temperature", config.get("temperature", 0.7)),
+        max_tokens=llm_config.get("maxTokens", config.get("maxTokens", 4096)),
     )
 
 

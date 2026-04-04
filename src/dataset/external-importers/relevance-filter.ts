@@ -9,7 +9,7 @@
  */
 
 import type { ParsedSession } from "./base.js";
-import type { EvolutionConfig } from "../../types.js";
+import type { EvolutionConfig, LlmConfig } from "../../types.js";
 
 /**
  * Relevance score result from LLM evaluation
@@ -55,11 +55,22 @@ export class RelevanceFilter {
   private config: EvolutionConfig;
   private apiKey: string;
   private apiBaseUrl: string;
+  private model: string;
+  private apiKeyEnvVar: string;
+  private temperature: number;
+  private maxTokens: number;
 
-  constructor(config: EvolutionConfig) {
+  constructor(config: EvolutionConfig, llmConfig?: LlmConfig) {
     this.config = config;
-    this.apiKey = process.env.MINIMAX_API_KEY ?? "";
-    this.apiBaseUrl = "https://api.minimax.io";
+
+    // Use provided config or fall back to defaults
+    this.model = llmConfig?.model ?? "MiniMax-M2.7";
+    this.apiBaseUrl = llmConfig?.apiBase ?? "https://api.minimax.io";
+    this.apiKeyEnvVar = llmConfig?.apiKeyEnvVar ?? "MINIMAX_API_KEY";
+    this.temperature = llmConfig?.temperature ?? 0.1;
+    this.maxTokens = llmConfig?.maxTokens ?? 500;
+
+    this.apiKey = process.env[this.apiKeyEnvVar] ?? "";
   }
 
   /**
@@ -201,7 +212,7 @@ Return ONLY this JSON:
    */
   private async callMiniMax(prompt: string): Promise<string> {
     if (!this.apiKey) {
-      throw new Error("MINIMAX_API_KEY environment variable is not set");
+      throw new Error(`${this.apiKeyEnvVar} environment variable is not set`);
     }
 
     const response = await fetch(
@@ -213,7 +224,7 @@ Return ONLY this JSON:
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify({
-          model: "MiniMax-M2.7",
+          model: this.model,
           messages: [
             {
               role: "system",
@@ -225,8 +236,8 @@ Return ONLY this JSON:
               content: prompt,
             },
           ],
-          temperature: 0.1,
-          max_tokens: 500,
+          temperature: this.temperature,
+          max_tokens: this.maxTokens,
         }),
       }
     );

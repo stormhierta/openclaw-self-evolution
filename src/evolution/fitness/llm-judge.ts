@@ -21,6 +21,7 @@ import type {
   FitnessComponents,
   DatasetEntry,
   EvolutionConfig,
+  LlmConfig,
 } from "../../types.js";
 import { RubricRegistry } from "./rubrics.js";
 
@@ -72,12 +73,23 @@ export class LlmJudge {
   private rubricRegistry: RubricRegistry;
   private apiKey: string;
   private apiBaseUrl: string;
+  private model: string;
+  private apiKeyEnvVar: string;
+  private temperature: number;
+  private maxTokens: number;
 
-  constructor(config: EvolutionConfig, rubricRegistry: RubricRegistry) {
+  constructor(config: EvolutionConfig, rubricRegistry: RubricRegistry, llmConfig?: LlmConfig) {
     this.config = config;
     this.rubricRegistry = rubricRegistry;
-    this.apiKey = process.env.MINIMAX_API_KEY ?? "";
-    this.apiBaseUrl = "https://api.minimax.io";
+
+    // Use provided config or fall back to defaults
+    this.model = llmConfig?.model ?? "MiniMax-M2.7";
+    this.apiBaseUrl = llmConfig?.apiBase ?? "https://api.minimax.io";
+    this.apiKeyEnvVar = llmConfig?.apiKeyEnvVar ?? "MINIMAX_API_KEY";
+    this.temperature = llmConfig?.temperature ?? 0.1;
+    this.maxTokens = llmConfig?.maxTokens ?? 1000;
+
+    this.apiKey = process.env[this.apiKeyEnvVar] ?? "";
   }
 
   /**
@@ -259,7 +271,7 @@ Return ONLY this JSON (no other text):
    */
   private async callMiniMax(prompt: string): Promise<string> {
     if (!this.apiKey) {
-      throw new Error("MINIMAX_API_KEY environment variable is not set");
+      throw new Error(`${this.apiKeyEnvVar} environment variable is not set`);
     }
 
     const response = await fetch(
@@ -271,7 +283,7 @@ Return ONLY this JSON (no other text):
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify({
-          model: "MiniMax-M2.7",
+          model: this.model,
           messages: [
             {
               role: "system",
@@ -283,8 +295,8 @@ Return ONLY this JSON (no other text):
               content: prompt,
             },
           ],
-          temperature: 0.1, // Low temperature for consistent scoring
-          max_tokens: 1000,
+          temperature: this.temperature,
+          max_tokens: this.maxTokens,
         }),
       }
     );

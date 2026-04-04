@@ -9,7 +9,7 @@
  */
 
 import Database from "better-sqlite3";
-import type { EvolutionConfig, TurnRecordRow } from "../types.js";
+import type { EvolutionConfig, TurnRecordRow, LlmConfig } from "../types.js";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 
@@ -66,6 +66,10 @@ export class OutcomeLabeler {
   private isInitialized = false;
   private apiKey: string;
   private apiBaseUrl: string;
+  private model: string;
+  private apiKeyEnvVar: string;
+  private temperature: number;
+  private maxTokens: number;
   private externalDb: Database.Database | null = null;
 
   // Prepared statement for updating reward signals
@@ -75,11 +79,19 @@ export class OutcomeLabeler {
    * @param config - Plugin config
    * @param sharedDb - Optional: reuse an existing DB connection (e.g. from TrajectoryLogger)
    *                   to avoid dual-connection SQLITE_BUSY contention.
+   * @param llmConfig - Optional: LLM configuration for the labeler component
    */
-  constructor(config: EvolutionConfig, sharedDb?: Database.Database) {
+  constructor(config: EvolutionConfig, sharedDb?: Database.Database, llmConfig?: LlmConfig) {
     this.config = config;
-    this.apiKey = process.env.MINIMAX_API_KEY ?? "";
-    this.apiBaseUrl = "https://api.minimax.io";
+
+    // Use provided config or fall back to defaults
+    this.model = llmConfig?.model ?? "MiniMax-M2.7";
+    this.apiBaseUrl = llmConfig?.apiBase ?? "https://api.minimax.io";
+    this.apiKeyEnvVar = llmConfig?.apiKeyEnvVar ?? "MINIMAX_API_KEY";
+    this.temperature = llmConfig?.temperature ?? 0.1;
+    this.maxTokens = llmConfig?.maxTokens ?? 500;
+
+    this.apiKey = process.env[this.apiKeyEnvVar] ?? "";
     if (sharedDb) {
       this.externalDb = sharedDb;
       this.db = sharedDb;
@@ -533,7 +545,7 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation", "outcome"
    */
   private async callMiniMax(prompt: string): Promise<string> {
     if (!this.apiKey) {
-      throw new Error("MINIMAX_API_KEY environment variable is not set");
+      throw new Error(`${this.apiKeyEnvVar} environment variable is not set`);
     }
 
     const controller = new AbortController();
@@ -549,7 +561,7 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation", "outcome"
             Authorization: `Bearer ${this.apiKey}`,
           },
           body: JSON.stringify({
-            model: "MiniMax-M2.7",
+            model: this.model,
             messages: [
               {
                 role: "system",
@@ -561,8 +573,8 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation", "outcome"
                 content: prompt,
               },
             ],
-            temperature: 0.1, // Low temperature for consistent scoring
-            max_tokens: 500,
+            temperature: this.temperature,
+            max_tokens: this.maxTokens,
           }),
           signal: controller.signal,
         }

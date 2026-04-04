@@ -9,7 +9,7 @@
  * - Direct MiniMax API calls via fetch (no OpenClaw provider import per requirements)
  */
 
-import type { DatasetEntry, DatasetEntryMetadata, EvolutionConfig } from "../types.js";
+import type { DatasetEntry, DatasetEntryMetadata, EvolutionConfig, LlmConfig } from "../types.js";
 
 /**
  * Response structure from MiniMax API
@@ -40,11 +40,22 @@ export class SyntheticGenerator {
   private config: EvolutionConfig;
   private apiKey: string;
   private apiBaseUrl: string;
+  private model: string;
+  private apiKeyEnvVar: string;
+  private temperature: number;
+  private maxTokens: number;
 
-  constructor(config: EvolutionConfig) {
+  constructor(config: EvolutionConfig, llmConfig?: LlmConfig) {
     this.config = config;
-    this.apiKey = process.env.MINIMAX_API_KEY ?? "";
-    this.apiBaseUrl = "https://api.minimax.io";
+
+    // Use provided config or fall back to defaults
+    this.model = llmConfig?.model ?? "MiniMax-M2.7";
+    this.apiBaseUrl = llmConfig?.apiBase ?? "https://api.minimax.io";
+    this.apiKeyEnvVar = llmConfig?.apiKeyEnvVar ?? "MINIMAX_API_KEY";
+    this.temperature = llmConfig?.temperature ?? 0.7;
+    this.maxTokens = llmConfig?.maxTokens ?? 4000;
+
+    this.apiKey = process.env[this.apiKeyEnvVar] ?? "";
   }
 
   /**
@@ -214,7 +225,7 @@ Do not include any explanation or markdown formatting, only the JSON array.`;
    */
   private async callMiniMax(prompt: string): Promise<string> {
     if (!this.apiKey) {
-      throw new Error("MINIMAX_API_KEY environment variable is not set");
+      throw new Error(`${this.apiKeyEnvVar} environment variable is not set`);
     }
 
     const response = await fetch(`${this.apiBaseUrl}/v1/text/chatcompletion_v2`, {
@@ -224,7 +235,7 @@ Do not include any explanation or markdown formatting, only the JSON array.`;
         "Authorization": `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({
-        model: "MiniMax-M2.7",
+        model: this.model,
         messages: [
           {
             role: "system",
@@ -235,8 +246,8 @@ Do not include any explanation or markdown formatting, only the JSON array.`;
             content: prompt,
           },
         ],
-        temperature: 0.7,
-        max_tokens: 4000,
+        temperature: this.temperature,
+        max_tokens: this.maxTokens,
       }),
     });
 
