@@ -16,6 +16,7 @@
  * Dependencies:
  * - LlmJudge from src/evolution/fitness/llm-judge.ts
  * - RubricRegistry from src/evolution/fitness/rubrics.ts
+ * - ConstraintValidator from src/validation/constraint-validator.ts
  * 
  * MiniMax API pattern: same as LlmJudge.callMiniMax() (llm-judge.ts lines 252-289)
  */
@@ -33,6 +34,7 @@ import type {
 } from "../../types.js";
 import { LlmJudge } from "../fitness/llm-judge.js";
 import { RubricRegistry } from "../fitness/rubrics.js";
+import { ConstraintValidator } from "../../validation/constraint-validator.js";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
@@ -152,17 +154,20 @@ export class GEPAEvolver {
   private config: EvolutionConfig;
   private judge: LlmJudge;
   private rubricRegistry: RubricRegistry;
+  private constraintValidator: ConstraintValidator;
   private apiKey: string;
   private apiBaseUrl: string;
 
   constructor(
     config: EvolutionConfig,
     judge: LlmJudge,
-    rubricRegistry: RubricRegistry
+    rubricRegistry: RubricRegistry,
+    constraintValidator: ConstraintValidator
   ) {
     this.config = config;
     this.judge = judge;
     this.rubricRegistry = rubricRegistry;
+    this.constraintValidator = constraintValidator;
     this.apiKey = process.env.MINIMAX_API_KEY ?? "";
     this.apiBaseUrl = "https://api.minimax.io";
   }
@@ -201,8 +206,8 @@ export class GEPAEvolver {
     // Step 1: Score baseline
     const baselineScore = await this.judge.scoreBaseline(skillName, skillContent, testCases);
 
-    // Step 2: Generate initial population
-    const initialVariants = await this.generateVariants(skillContent, populationSize);
+    // Step 2: Generate initial population with constraint validation
+    const initialVariants = await this.generateValidVariants(skillContent, populationSize, skillContent);
     const enrichedVariants = initialVariants.map((v) => ({
       ...v,
       skillName,
@@ -228,6 +233,13 @@ export class GEPAEvolver {
         testCases
       );
       totalVariantsEvaluated += scoredVariants.length;
+
+      // Guard: if all variants failed constraints, fall back to baseline
+      if (scoredVariants.length === 0) {
+        console.warn("[evolver] All variants failed constraints in generation, keeping baseline");
+        stopReason = "no_improvement";
+        break;
+      }
 
       // Find best in this generation
       const genBest = scoredVariants.reduce((best, curr) =>
@@ -281,7 +293,11 @@ export class GEPAEvolver {
         { type: "structure_change", description: "Change structure" },
       ];
 
-      for (let i = 0; i < populationSize - safeEliteSize; i++) {
+      let attempts = 0;
+      const maxAttempts = (populationSize - safeEliteSize) * 3;
+
+      while (newVariants.length < populationSize - safeEliteSize && attempts < maxAttempts) {
+        attempts++;
         // Pick random elite
         const elite = elites[Math.floor(Math.random() * elites.length)];
         
@@ -303,36 +319,64 @@ export class GEPAEvolver {
               mutation,
               parentWithScore  // Pass parent variant with score for reflective mutation
             );
-            newVariants.push({
-              id: `${skillName}-gen${generation}-mutant${i}-${Date.now()}`,
+            const mutatedVariant: SkillVariant = {
+              id: `${skillName}-gen${generation}-mutant${attempts}-${Date.now()}`,
               skillName,
               generation,
               content: mutatedContent,
               mutations: [mutation],
               parents: [elite.variant.id],
               createdAt: new Date(),
-            });
+            };
+
+            // Constraint check after mutation, before scoring
+            const constraintCheck = this.constraintValidator.validateVariant(mutatedVariant, skillContent);
+            if (!constraintCheck.valid) {
+              const failedChecks = constraintCheck.checks.filter(c => !c.passed).map(c => c.name).join(', ');
+              console.warn(`[evolver] Rejected invalid variant after mutation: ${failedChecks}`);
+              // Skip this variant - don't add to population for scoring
+              continue;
+            }
+
+            newVariants.push(mutatedVariant);
+            continue; // Move to next slot
           } catch (err) {
-            // If mutation fails, fall back to generating a fresh variant
+            // If mutation fails, fall back to generating a fresh variant with constraint validation
             const fallback = await this.generateSingleVariant(skillContent);
-            newVariants.push({
+            const fallbackVariant: SkillVariant = {
               ...fallback,
-              id: `${skillName}-gen${generation}-fallback${i}-${Date.now()}`,
+              id: `${skillName}-gen${generation}-fallback${attempts}-${Date.now()}`,
               skillName,
               generation,
               parents: [elite.variant.id],
-            });
+            };
+
+            // Validate fallback variant
+            const fallbackCheck = this.constraintValidator.validateVariant(fallbackVariant, skillContent);
+            if (!fallbackCheck.valid) {
+              const failedChecks = fallbackCheck.checks.filter(c => !c.passed).map(c => c.name).join(', ');
+              console.warn(`[evolver] Fallback variant also invalid: ${failedChecks}`);
+              continue;
+            }
+
+            newVariants.push(fallbackVariant);
+            continue; // Move to next slot
           }
         } else {
-          // No mutation, clone elite
+          // No mutation, clone elite (elites are already validated)
           newVariants.push({
             ...elite.variant,
-            id: `${skillName}-gen${generation}-clone${i}-${Date.now()}`,
+            id: `${skillName}-gen${generation}-clone${attempts}-${Date.now()}`,
             generation,
             mutations: [],
             parents: [elite.variant.id],
           });
         }
+      }
+
+      // If we couldn't fill all slots, pad with clones of elites
+      while (newVariants.length < populationSize - safeEliteSize && elites.length > 0) {
+        newVariants.push({ ...elites[newVariants.length % elites.length].variant });
       }
 
       // Next generation = elites + new variants
@@ -429,6 +473,45 @@ export class GEPAEvolver {
       });
     }
     return variants;
+  }
+
+  /**
+   * Generate valid variants with constraint checking.
+   * Rejects invalid variants early to save LLM judge calls.
+   * Allows 3x attempts for replacements.
+   * 
+   * @param skillContent - Original skill content to mutate
+   * @param count - Number of valid variants to generate
+   * @param baselineContent - Baseline content for growth check
+   * @returns Array of valid SkillVariant objects
+   */
+  async generateValidVariants(
+    skillContent: string,
+    count: number,
+    baselineContent: string,
+  ): Promise<SkillVariant[]> {
+    const valid: SkillVariant[] = [];
+    let attempts = 0;
+    const maxAttempts = count * 3; // Allow 3x attempts for valid variants
+
+    while (valid.length < count && attempts < maxAttempts) {
+      const variant = await this.generateSingleVariant(skillContent);
+      const check = this.constraintValidator.validateVariant(variant, baselineContent);
+
+      if (check.valid) {
+        valid.push(variant);
+      } else {
+        const failedChecks = check.checks.filter(c => !c.passed).map(c => c.name).join(', ');
+        console.warn(`[evolver] Rejected invalid initial variant: ${failedChecks}`);
+      }
+      attempts++;
+    }
+
+    if (valid.length < count) {
+      console.warn(`[evolver] Only generated ${valid.length}/${count} valid variants after ${maxAttempts} attempts`);
+    }
+
+    return valid;
   }
 
   /**

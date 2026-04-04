@@ -24,6 +24,7 @@ import { DatasetSessionMiner } from "./dataset/session-miner.js";
 import { SyntheticGenerator } from "./dataset/synthetic-generator.js";
 import { GoldenSetLoader } from "./dataset/golden-sets.js";
 import { SkillValidator } from "./validation/skill-validator.js";
+import { ConstraintValidator } from "./validation/constraint-validator.js";
 import { TestRunner } from "./validation/test-runner.js";
 import { BenchmarkGate } from "./validation/benchmark-gate.js";
 import { readFileSync, existsSync } from "node:fs";
@@ -409,7 +410,10 @@ function createRunEvolutionTool(config: EvolutionConfig): AnyAgentTool {
         // 4. Instantiate dependencies
         const rubricRegistry = new RubricRegistry(config);
         const llmJudge = new LlmJudge(config, rubricRegistry);
-        const evolver = new GEPAEvolver(config, llmJudge, rubricRegistry);
+        const sizeLimits = new SizeLimits(config);
+        const skillValidator = new SkillValidator(config, sizeLimits);
+        const constraintValidator = new ConstraintValidator(skillValidator, sizeLimits, config);
+        const evolver = new GEPAEvolver(config, llmJudge, rubricRegistry, constraintValidator);
 
         // SessionMiner and SyntheticGenerator need trajectoryLogger
         if (!trajectoryLogger) {

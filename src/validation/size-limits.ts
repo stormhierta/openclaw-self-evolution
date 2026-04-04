@@ -101,6 +101,34 @@ export class SizeLimits {
   }
 
   /**
+   * Check if content growth vs baseline is within limits.
+   * Max growth ratio: 0.5 (50% increase allowed).
+   */
+  checkGrowth(
+    content: string,
+    baseline: string,
+  ): {
+    valid: boolean;
+    growthRatio: number;
+    maxGrowth: number;
+    error?: string;
+  } {
+    const baselineLength = Math.max(1, baseline.length);
+    const growthRatio = (content.length - baselineLength) / baselineLength;
+    const maxGrowth = 0.5; // 50% growth limit
+    const valid = growthRatio <= maxGrowth;
+
+    return {
+      valid,
+      growthRatio,
+      maxGrowth,
+      error: valid
+        ? undefined
+        : `Growth ${(growthRatio * 100).toFixed(1)}% exceeds max ${(maxGrowth * 100).toFixed(0)}%`,
+    };
+  }
+
+  /**
    * Run all size and structural checks against skill content.
    */
   checkAll(
