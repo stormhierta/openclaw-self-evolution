@@ -792,7 +792,7 @@ export class GEPAEvolver {
       bestScore,
       baselineScore,
       improvement: Math.round(finalImprovement * 100) / 100,
-      stoppedEarly,
+      stoppedEarly: stopReason !== "max_generations",
       stopReason,
       generationsCompleted: generationHistory.length,
       totalVariantsEvaluated,
