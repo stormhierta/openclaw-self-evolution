@@ -91,11 +91,14 @@ export class TestRunner {
   private config: EvolutionConfig;
   private apiKey: string;
   private apiBaseUrl: string;
+  private model: string;
 
   constructor(config: EvolutionConfig) {
     this.config = config;
-    this.apiKey = process.env.MINIMAX_API_KEY ?? "";
-    this.apiBaseUrl = "https://api.minimax.io";
+    const llmConfig = config.llm?.testRunner ?? {};
+    this.apiKey = process.env[llmConfig.apiKeyEnvVar ?? "MINIMAX_API_KEY"] ?? "";
+    this.apiBaseUrl = llmConfig.apiBase ?? "https://api.minimax.io";
+    this.model = llmConfig.model ?? "MiniMax-M2.7";
   }
 
   /**
@@ -334,7 +337,7 @@ Simulated Output:`;
             Authorization: `Bearer ${this.apiKey}`,
           },
           body: JSON.stringify({
-            model: "MiniMax-M2.7",
+            model: this.model,
             messages: [
               {
                 role: "system",

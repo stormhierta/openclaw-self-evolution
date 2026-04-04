@@ -155,8 +155,6 @@ export class GEPAEvolver {
   private judge: LlmJudge;
   private rubricRegistry: RubricRegistry;
   private constraintValidator: ConstraintValidator;
-  private apiKey: string;
-  private apiBaseUrl: string;
 
   constructor(
     config: EvolutionConfig,
@@ -168,8 +166,6 @@ export class GEPAEvolver {
     this.judge = judge;
     this.rubricRegistry = rubricRegistry;
     this.constraintValidator = constraintValidator;
-    this.apiKey = process.env.MINIMAX_API_KEY ?? "";
-    this.apiBaseUrl = "https://api.minimax.io";
   }
 
   // ==========================================================================
@@ -1174,20 +1170,28 @@ Return ONLY the variant skill content (Markdown format). No explanations outside
    * Pattern matches: LlmJudge.callMiniMax() (llm-judge.ts lines 252-289)
    */
   private async callMiniMax(prompt: string): Promise<string> {
-    if (!this.apiKey) {
-      throw new Error("MINIMAX_API_KEY environment variable is not set");
+    const llmConfig = this.config.llm?.evolver ?? {};
+    const model = llmConfig.model ?? "MiniMax-M2.7";
+    const apiBase = llmConfig.apiBase ?? "https://api.minimax.io";
+    const apiKeyEnvVar = llmConfig.apiKeyEnvVar ?? "MINIMAX_API_KEY";
+    const apiKey = process.env[apiKeyEnvVar] ?? "";
+    const temperature = llmConfig.temperature ?? 0.7;
+    const maxTokens = llmConfig.maxTokens ?? 4096;
+
+    if (!apiKey) {
+      throw new Error(`${apiKeyEnvVar} environment variable is not set`);
     }
 
     const response = await fetch(
-      `${this.apiBaseUrl}/v1/text/chatcompletion_v2`,
+      `${apiBase}/v1/text/chatcompletion_v2`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          model: "MiniMax-M2.7",
+          model,
           messages: [
             {
               role: "system",
@@ -1199,8 +1203,8 @@ Return ONLY the variant skill content (Markdown format). No explanations outside
               content: prompt,
             },
           ],
-          temperature: 0.7, // Higher temperature for creative variant generation
-          max_tokens: 2000,
+          temperature,
+          max_tokens: maxTokens,
         }),
       }
     );

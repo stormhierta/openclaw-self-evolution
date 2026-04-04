@@ -86,6 +86,10 @@ export interface EvolutionLlmConfig {
   relevance?: LlmConfig;
   /** DSPy bridge configuration (python/dspy_bridge.py) */
   dspy?: LlmConfig;
+  /** GEPA evolver for mutation prompt rewriting (src/evolution/gepa/evolver.ts) */
+  evolver?: LlmConfig;
+  /** Test runner for test execution simulation (src/validation/test-runner.ts) */
+  testRunner?: LlmConfig;
 }
 
 /** Main plugin configuration interface */

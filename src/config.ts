@@ -78,6 +78,8 @@ export const EvolutionLlmConfigSchema = z.object({
   labeler: LlmConfigSchema.optional(),
   relevance: LlmConfigSchema.optional(),
   dspy: LlmConfigSchema.optional(),
+  evolver: LlmConfigSchema.optional(),
+  testRunner: LlmConfigSchema.optional(),
 }).strict();
 
 // ============================================================================

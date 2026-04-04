@@ -221,6 +221,14 @@
           "dspy": {
             "$ref": "#/configSchema/definitions/llmConfig",
             "description": "LLM configuration for DSPy bridge"
+          },
+          "evolver": {
+            "$ref": "#/configSchema/definitions/llmConfig",
+            "description": "LLM configuration for GEPA evolver mutation prompts"
+          },
+          "testRunner": {
+            "$ref": "#/configSchema/definitions/llmConfig",
+            "description": "LLM configuration for test execution simulation"
           }
         }
       }
