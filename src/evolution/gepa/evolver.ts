@@ -450,25 +450,18 @@ export class GEPAEvolver {
       throw new Error("Cannot select best from empty scored variant list");
     }
 
-    // Build score lookup by variant id
-    const scoreMap = new Map<string, FitnessScore>();
-    for (const sv of scoredVariants) {
-      scoreMap.set(sv.variant.id, sv.score);
-    }
+    // Find variant with highest overall score by iterating scoredVariants
+    let bestScored = scoredVariants[0];
+    let bestScore = bestScored.score.overall;
 
-    // Find variant with highest overall score
-    let bestVariant = variants[0];
-    let bestScore = scoreMap.get(bestVariant.id)?.overall ?? -Infinity;
-
-    for (const variant of variants) {
-      const score = scoreMap.get(variant.id)?.overall ?? -Infinity;
-      if (score > bestScore) {
-        bestScore = score;
-        bestVariant = variant;
+    for (const scored of scoredVariants) {
+      if (scored.score.overall > bestScore) {
+        bestScore = scored.score.overall;
+        bestScored = scored;
       }
     }
 
-    return bestVariant;
+    return bestScored.variant;
   }
 
   /**
