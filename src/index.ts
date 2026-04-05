@@ -40,6 +40,7 @@ import { EvolutionTrigger } from "./automation/evolution-trigger.js";
 import { EvolutionScheduler } from "./automation/scheduler.js";
 import { SessionMiner } from "./collection/session-miner.js";
 import { RubricRegistry } from "./evolution/fitness/rubrics.js";
+import { skillManagerTool } from "./tools/skill-manager-schema.js";
 import { LlmJudge } from "./evolution/fitness/llm-judge.js";
 import type {
   LlmInputEvent,
@@ -1480,6 +1481,11 @@ async function register(api: OpenClawPluginApi): Promise<void> {
 
   api.registerTool(createRunSchedulerCycleTool(pluginConfig), {
     name: "run_scheduler_cycle",
+  });
+
+  // Register skill manager tool
+  api.registerTool(skillManagerTool, {
+    name: "skill_manage",
   });
 
   // Register CLI commands
