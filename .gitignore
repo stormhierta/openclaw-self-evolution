@@ -28,3 +28,4 @@ Thumbs.db
 *.tsbuildinfo
 /reference/hermes-agent-self-evolution/
 coverage/
+reference/hermes-agent
