@@ -17,6 +17,7 @@ import type { EvolutionConfig, TurnRecordRow, EpisodeRecordRow, TrajectoryFilter
 import type { TrajectoryHookHandler } from "../hooks/trajectory-hooks.js";
 import type { OutcomeLabeler } from "./outcome-labeler.js";
 import { containsSecretInAny } from "./secret-detector.js";
+import { saveTrajectory } from "./trajectory-exporter.js";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 
@@ -395,11 +396,73 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation"}`;
    */
   private async processLabelingChunks(turns: TurnRecordRow[]): Promise<void> {
     if (!this.outcomeLabeler) return;
-    
+
     const chunkSize = 20;
     for (let i = 0; i < turns.length; i += chunkSize) {
       const chunk = turns.slice(i, i + chunkSize);
       await this.outcomeLabeler.labelBatch(chunk);
+    }
+  }
+
+  /**
+   * Export episodes to JSONL format for training data collection.
+   * Converts turns to ShareGPT format and appends to trajectory files.
+   */
+  private async exportEpisodesToJsonl(
+    episodes: EpisodeRecordRow[],
+    committedTurnIds: Set<string>,
+    turns: TurnRecordRow[]
+  ): Promise<void> {
+    for (const episode of episodes) {
+      // Get turns for this episode that were committed in this flush
+      const episodeTurns = turns
+        .filter(t => t.episode_id === episode.id && committedTurnIds.has(t.id))
+        .sort((a, b) => a.turn_number - b.turn_number);
+
+      // Skip episodes with no turns
+      if (episodeTurns.length === 0) {
+        continue;
+      }
+
+      // Build ShareGPT-format conversation
+      const trajectory: Array<{ role: string; content: string }> = [];
+      let model = this.model; // default to logger's model
+
+      for (const turn of episodeTurns) {
+        // User message -> role: 'human'
+        if (turn.user_message) {
+          trajectory.push({
+            role: "human",
+            content: turn.user_message,
+          });
+        }
+
+        // Assistant response from action_json -> role: 'gpt'
+        try {
+          const actionJson = JSON.parse(turn.action_json) as Record<string, unknown>;
+          const content = actionJson.content as string | undefined;
+          if (content) {
+            trajectory.push({
+              role: "gpt",
+              content,
+            });
+          }
+
+          // Extract model from action_json if available
+          const turnModel = actionJson.model as string | undefined;
+          if (turnModel) {
+            model = turnModel;
+          }
+        } catch {
+          // If action_json doesn't parse, skip the assistant turn
+        }
+      }
+
+      // Only export if we have at least one turn
+      if (trajectory.length > 0) {
+        const completed = episode.outcome === "success";
+        await saveTrajectory(trajectory, model, completed);
+      }
     }
   }
 
@@ -503,10 +566,13 @@ Return ONLY a JSON object: {"score": N, "reason": "brief explanation"}`;
 
     try {
       transaction();
-      
+
       // FIX 1: Only remove the specific turns/episodes we committed (not any new ones added during await)
       this.handler.removeFinalizedTurns(committedTurnIds);
       this.handler.removeCompletedEpisodes(committedEpisodeIds);
+
+      // Export episodes to JSONL for training data collection
+      await this.exportEpisodesToJsonl(episodes, committedTurnIds, turns);
 
       // FIX 1 (P3-B): Fire-and-forget background labeling for turns with target_skill
       // This happens AFTER DB commit so flush() doesn't block on LLM calls
