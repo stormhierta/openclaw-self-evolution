@@ -5,10 +5,11 @@
  * Part of P3-A: Self-triggered evolution.
  */
 
-import type { EvolutionConfig } from "../types.js";
+import type { EvolutionConfig, SkillCreationRecommendation } from "../types.js";
 import Database from "better-sqlite3";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
+import { TaskPatternDetector } from "../collection/task-pattern-detector.js";
 
 // ============================================================================
 // Types
@@ -34,6 +35,12 @@ export interface TriggerDecision {
 interface WindowStats {
   avgReward: number;
   turnCount: number;
+}
+
+/** Result of checking all skills including pattern-based recommendations */
+export interface EvolutionTriggerResult {
+  triggers: TriggerDecision[];
+  skillCreationRecommendations: SkillCreationRecommendation[];
 }
 
 // ============================================================================
@@ -348,10 +355,17 @@ export class EvolutionTrigger {
 
   /**
    * Check all tracked skills, return those needing evolution.
+   * Also includes skill creation recommendations for recurring patterns
+   * that don't have a corresponding skill.
    */
-  async checkAllSkills(): Promise<TriggerDecision[]> {
+  async checkAllSkills(): Promise<EvolutionTriggerResult> {
     await this.ensureInitialized();
 
+    if (!this.db) {
+      throw new Error("Database not initialized");
+    }
+
+    // Check existing skills for evolution triggers
     const skills = this.getTrackedSkills();
     const decisions: TriggerDecision[] = [];
 
@@ -368,7 +382,14 @@ export class EvolutionTrigger {
       (a, b) => urgencyOrder[a.urgency] - urgencyOrder[b.urgency]
     );
 
-    return decisions;
+    // Check for patterns that suggest new skill creation
+    const patternDetector = new TaskPatternDetector(this.db);
+    const skillCreationRecommendations = patternDetector.analyze();
+
+    return {
+      triggers: decisions,
+      skillCreationRecommendations,
+    };
   }
 
   /**

@@ -213,9 +213,17 @@ export class EvolutionScheduler {
       // Step 2: Check all skills via EvolutionTrigger
       let skillsNeedingEvolution: TriggerDecision[] = [];
       try {
-        skillsNeedingEvolution = await this.evolutionTrigger.checkAllSkills();
+        const triggerResult = await this.evolutionTrigger.checkAllSkills();
+        skillsNeedingEvolution = triggerResult.triggers;
         result.skillsNeedingEvolution = skillsNeedingEvolution.length;
         console.log(`[evolution-scheduler] ${skillsNeedingEvolution.length} skills need evolution`);
+        // Log skill creation recommendations if any
+        if (triggerResult.skillCreationRecommendations.length > 0) {
+          console.log(`[evolution-scheduler] ${triggerResult.skillCreationRecommendations.length} skill creation recommendations found`);
+          for (const rec of triggerResult.skillCreationRecommendations) {
+            console.log(`[evolution-scheduler]   - ${rec.suggestedSkillName}: ${rec.pattern} (${rec.occurrences} occurrences, ${(rec.confidence * 100).toFixed(0)}% confidence)`);
+          }
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         result.errors.push(`Skill check failed: ${msg}`);

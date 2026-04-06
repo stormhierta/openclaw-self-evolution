@@ -182,12 +182,12 @@ function createCheckEvolutionNeedTool(config: EvolutionConfig): AnyAgentTool {
           });
         } else {
           // Check all tracked skills
-          const decisions = await evolutionTrigger.checkAllSkills();
+          const triggerResult = await evolutionTrigger.checkAllSkills();
           return jsonResult({
             success: true,
             checkedAll: true,
-            skillsNeedingEvolution: decisions.length,
-            decisions: decisions.map((d) => ({
+            skillsNeedingEvolution: triggerResult.triggers.length,
+            decisions: triggerResult.triggers.map((d) => ({
               skillName: d.skillName,
               shouldEvolve: d.shouldEvolve,
               reason: d.reason,
@@ -199,6 +199,13 @@ function createCheckEvolutionNeedTool(config: EvolutionConfig): AnyAgentTool {
                 turnsInWindow: d.currentPerformance.turnsInWindow,
                 lastEvaluated: d.currentPerformance.lastEvaluated.toISOString(),
               },
+            })),
+            skillCreationRecommendations: triggerResult.skillCreationRecommendations.map((r) => ({
+              pattern: r.pattern,
+              occurrences: r.occurrences,
+              suggestedSkillName: r.suggestedSkillName,
+              confidence: r.confidence,
+              examplePrompts: r.examplePrompts,
             })),
           });
         }

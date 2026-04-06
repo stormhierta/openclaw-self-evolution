@@ -534,6 +534,19 @@ export interface PrRecord {
 }
 
 // ============================================================================
+// Task Pattern Detector Types (Gap Closure - Chunk D)
+// ============================================================================
+
+/** Recommendation for creating a new skill based on detected patterns */
+export interface SkillCreationRecommendation {
+  pattern: string; // detected task pattern description
+  occurrences: number; // how many times seen
+  suggestedSkillName: string; // kebab-case suggested skill id
+  confidence: number; // 0-1
+  examplePrompts: string[]; // up to 3 example prompt snippets
+}
+
+// ============================================================================
 // SDK Hook Result Types
 // ============================================================================
 
