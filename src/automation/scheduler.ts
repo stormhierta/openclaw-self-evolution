@@ -32,6 +32,7 @@ import { TrajectoryLogger } from "../collection/trajectory-logger.js";
 import { TrajectoryHookHandler } from "../hooks/trajectory-hooks.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { getSkillRegistry } from "../collection/skill-registry.js";
 
 // ============================================================================
 // Configuration Types
@@ -438,6 +439,11 @@ export class EvolutionScheduler {
    * Resolve the skill file path for a given skill name.
    */
   private resolveSkillPath(skillName: string): string {
+    // Use SkillRegistry for accurate multi-directory resolution
+    // (covers managed, workspace, bundled, and .agents skill directories)
+    const registryPath = getSkillRegistry().getSkillPath(skillName);
+    if (registryPath) return registryPath;
+    // Fallback: default managed skills dir (backward compat)
     const skillsDir = `${process.env.HOME ?? "."}/.openclaw/skills`;
     return join(skillsDir, skillName, "SKILL.md");
   }
