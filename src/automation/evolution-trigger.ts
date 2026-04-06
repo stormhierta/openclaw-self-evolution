@@ -10,6 +10,7 @@ import Database from "better-sqlite3";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { TaskPatternDetector } from "../collection/task-pattern-detector.js";
+import { getSkillRegistry } from "../collection/skill-registry.js";
 
 // ============================================================================
 // Types
@@ -334,23 +335,12 @@ export class EvolutionTrigger {
   }
 
   /**
-   * Get all skills that have trajectory data.
+   * Get all skills from SkillRegistry.
+   * Returns skill IDs for all known skills, not just those with trajectory data.
    */
   private getTrackedSkills(): string[] {
-    if (!this.db) {
-      throw new Error("Database not initialized");
-    }
-
-    const query = `
-      SELECT DISTINCT target_skill
-      FROM evolution_turns
-      WHERE target_skill IS NOT NULL
-    `;
-
-    const stmt = this.db.prepare(query);
-    const rows = stmt.all() as Array<{ target_skill: string }>;
-
-    return rows.map((r) => r.target_skill);
+    const registry = getSkillRegistry();
+    return registry.getAllSkills().map((s) => s.id);
   }
 
   /**
@@ -370,6 +360,12 @@ export class EvolutionTrigger {
     const decisions: TriggerDecision[] = [];
 
     for (const skillName of skills) {
+      // Guard: skip if not a real skill (e.g., leftover tool names in DB)
+      const registry = getSkillRegistry();
+      if (!registry.getSkillByName(skillName)) {
+        continue;
+      }
+
       const decision = await this.checkSkill(skillName);
       if (decision.shouldEvolve) {
         decisions.push(decision);
