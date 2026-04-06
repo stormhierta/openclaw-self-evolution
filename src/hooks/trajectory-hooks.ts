@@ -18,6 +18,24 @@
 
 import type { EvolutionConfig, TurnRecordRow, EpisodeRecordRow } from "../types.js";
 import type { PluginHookBeforeToolCallResult } from "../types.js";
+import { getSkillRegistry } from "../collection/skill-registry.js";
+
+// ============================================================================
+// Skill Tool Detection for target_skill Attribution
+// ============================================================================
+
+// Tool names that operate on skills — extract skill identifier from params instead of using tool name
+// Grounded in: reference/hermes-agent/website/docs/reference/toolsets-reference.md (skills + memory toolsets)
+const SKILL_TOOLS = ['skill_manage', 'skill_view', 'memory'];
+
+/**
+ * Extract skill identifier from skill tool parameters.
+ * Returns undefined if tool is not a skill tool or no skill identifier found.
+ */
+function extractSkillFromToolParams(toolName: string, params: Record<string, unknown>): string | undefined {
+  if (!SKILL_TOOLS.includes(toolName)) return undefined;
+  return (params.name ?? params.skill ?? params.skillName) as string | undefined;
+}
 
 // ============================================================================
 // Hook Event Types (matching SDK PluginHookHandlerMap signatures)
@@ -344,10 +362,20 @@ export class TrajectoryHookHandler {
       episode.turnCount++;
 
       const turnId = generateId("turn");
-      const skillsUsed = extractSkillsFromText(event.prompt);
+      
+      // CHUNK B: Detect skills from system prompt using SkillRegistry
+      // This captures which SKILL.md files were injected into the context
+      const systemPromptText = event.systemPrompt ?? '';
+      const skillsFromSystemPrompt = getSkillRegistry().matchSkillsInText(systemPromptText);
+      
+      // Also extract skills from user prompt as fallback
+      const skillsFromPrompt = extractSkillsFromText(event.prompt);
+      
+      // Combine and deduplicate skills
+      const allSkillsUsed = [...new Set([...skillsFromSystemPrompt, ...skillsFromPrompt])];
       
       // Update episode skills
-      skillsUsed.forEach(skill => episode.skillsInvolved.add(skill));
+      allSkillsUsed.forEach(skill => episode.skillsInvolved.add(skill));
 
       const turn: TurnBufferEntry = {
         id: turnId,
@@ -372,8 +400,8 @@ export class TrajectoryHookHandler {
         outcome_type: "partial", // Will be updated on llm_output or agent_end
         outcome_json: safeJsonStringify({ status: "pending" }),
         reward_signal: undefined,
-        skills_used: JSON.stringify(skillsUsed),
-        target_skill: skillsUsed[0],
+        skills_used: JSON.stringify(allSkillsUsed),
+        target_skill: allSkillsUsed[0], // First detected skill from system prompt or prompt
         _internal: {
           createdAt: Date.now(),
           sessionId,
@@ -558,9 +586,28 @@ export class TrajectoryHookHandler {
       episode.turnCount++;
 
       const turnId = generateId("turn");
-      const skillsUsed = extractSkillsFromParams(event.params);
-      skillsUsed.push(event.toolName);
-      skillsUsed.forEach(skill => episode.skillsInvolved.add(skill));
+      
+      // CHUNK B: Determine target_skill for tool calls
+      // 1. If this is a skill tool (skill_view, skill_manage, etc.), extract skill from params
+      // 2. Otherwise, inherit from parent turn's target_skill if available
+      let targetSkill: string | undefined = extractSkillFromToolParams(event.toolName, event.params);
+      
+      // If not a skill tool, try to inherit from parent turn
+      if (!targetSkill && sessionKey && runId) {
+        for (let i = episode.turnIds.length - 1; i >= 0; i--) {
+          const parentTurnId = episode.turnIds[i];
+          const parentTurn = this.turnBuffer.get(parentTurnId);
+          if (parentTurn && parentTurn._internal.runId === runId && parentTurn.target_skill) {
+            targetSkill = parentTurn.target_skill;
+            break;
+          }
+        }
+      }
+      
+      // Build skills_used: combine detected skills from params with target skill
+      const skillsFromParams = extractSkillsFromParams(event.params);
+      const allSkillsUsed = [...new Set([...(targetSkill ? [targetSkill] : []), ...skillsFromParams])];
+      allSkillsUsed.forEach(skill => episode.skillsInvolved.add(skill));
 
       const turn: TurnBufferEntry = {
         id: turnId,
@@ -580,8 +627,8 @@ export class TrajectoryHookHandler {
         outcome_type: "partial",
         outcome_json: safeJsonStringify({ status: "pending" }),
         reward_signal: undefined,
-        skills_used: JSON.stringify([...new Set(skillsUsed)]),
-        target_skill: event.toolName,
+        skills_used: JSON.stringify(allSkillsUsed),
+        target_skill: targetSkill,
         _internal: {
           createdAt: Date.now(),
           sessionId: ctx.sessionId ?? sessionKey,
