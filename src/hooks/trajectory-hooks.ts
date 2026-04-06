@@ -889,7 +889,7 @@ export class TrajectoryHookHandler {
             outcome_json: safeJsonStringify({ status: "spawned" }),
             reward_signal: undefined,
             skills_used: JSON.stringify(["subagent"]),
-            target_skill: event.agentId,
+            target_skill: event.agentId?.toLowerCase(),
             _internal: {
               createdAt: Date.now(),
               sessionId: parentSessionKey!,
