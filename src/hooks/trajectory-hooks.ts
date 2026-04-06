@@ -670,14 +670,20 @@ export class TrajectoryHookHandler {
       if (!episode || episode.turnIds.length === 0) return;
 
       // Find the matching turn (most recent with same toolCallId and runId)
+      // If no toolCallId, fall back to matching by runId + partial status (most recent)
+      const useToolCallId = event.toolCallId !== undefined;
       for (let i = episode.turnIds.length - 1; i >= 0; i--) {
         const turnId = episode.turnIds[i];
         const turn = this.turnBuffer.get(turnId);
 
-        if (turn &&
-            turn._internal.runId === runId &&
-            turn._internal.toolCallId === event.toolCallId &&
-            turn.outcome_type === "partial") {
+        if (!turn || turn._internal.runId !== runId) continue;
+
+        // Match by toolCallId if available, otherwise fallback to most recent partial
+        const matched = useToolCallId
+          ? turn._internal.toolCallId === event.toolCallId
+          : turn.outcome_type === "partial";
+
+        if (matched) {
           
           // FIX 6: Check stored sampling decision
           if (!turn._internal._sampled) {
