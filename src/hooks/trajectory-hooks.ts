@@ -1,17 +1,17 @@
 /**
  * OpenClaw Self-Evolution Pipeline - Trajectory Hook Handler
- * 
+ *
  * Implements the actual trajectory logging logic for 9 hooks:
- * - llm_input — capture prompt/context before LLM call
- * - llm_output — capture response after LLM call
- * - agent_end — capture turn outcome
- * - before_tool_call — capture tool invocation intent
- * - after_tool_call — capture tool result
- * - session_start — start a new episode record
- * - session_end — close episode, compute summary
- * - subagent_spawned — note subagent delegation
- * - subagent_ended — capture subagent outcome
- * 
+ * - llm_input - capture prompt/context before LLM call
+ * - llm_output - capture response after LLM call
+ * - agent_end - capture turn outcome
+ * - before_tool_call - capture tool invocation intent
+ * - after_tool_call - capture tool result
+ * - session_start - start a new episode record
+ * - session_end - close episode, compute summary
+ * - subagent_spawned - note subagent delegation
+ * - subagent_ended - capture subagent outcome
+ *
  * Hook signatures match PluginHookHandlerMap from SDK types.d.ts
  * Source: openclaw/plugin-sdk/src/plugins/types.d.ts
  */
@@ -24,9 +24,18 @@ import { getSkillRegistry } from "../collection/skill-registry.js";
 // Skill Tool Detection for target_skill Attribution
 // ============================================================================
 
-// Tool names that operate on skills — extract skill identifier from params instead of using tool name
+// Tool names that operate on skills - extract skill identifier from params instead of using tool name
 // Grounded in: reference/hermes-agent/website/docs/reference/toolsets-reference.md (skills + memory toolsets)
 const SKILL_TOOLS = ['skill_manage', 'skill_view', 'memory'];
+
+// Tool names that must never appear as target_skill - these are OpenClaw built-in tools, not skills
+const TOOL_NAME_DENYLIST = new Set([
+  'exec', 'read', 'edit', 'write', 'grep', 'image', 'process',
+  'web_search', 'web_fetch', 'memory_search', 'memory_get',
+  'sessions_spawn', 'sessions_yield', 'sessions_list', 'sessions_history', 'sessions_send',
+  'session_status', 'subagents', 'cron', 'image_generate',
+  'MiniMax__web_search', 'MiniMax__understand_image'
+]);
 
 /**
  * Extract skill identifier from skill tool parameters.
@@ -253,11 +262,11 @@ function extractSkillsFromParams(params: Record<string, unknown>): string[] {
 
 /**
  * Handles trajectory logging for the self-evolution pipeline.
- * 
+ *
  * Implements typed handler methods for each hook, matching OpenClaw SDK
  * signatures from PluginHookHandlerMap (per SDK types.d.ts).
- * 
- * Stores captured data in memory (Map/array) — persistence to SQLite comes in T2.3.
+ *
+ * Stores captured data in memory (Map/array) - persistence to SQLite comes in T2.3.
  */
 export class TrajectoryHookHandler {
   private config: EvolutionConfig;
@@ -269,7 +278,7 @@ export class TrajectoryHookHandler {
   private activeEpisodes: Map<string, ActiveEpisode> = new Map();
   private sessionEpisodeMap: Map<string, string> = new Map(); // sessionId -> episodeId
   private subagentParentMap: Map<string, string> = new Map(); // childSessionKey -> parentSessionId
-  
+
   // FIX 6: Sample rate tracking for per-turn sampling
   private sampleCounter = 0;
 
@@ -297,7 +306,7 @@ export class TrajectoryHookHandler {
 
     this.sampleCounter++;
     const shouldInclude = Math.random() < sampleRate;
-    
+
     // Reset counter periodically to avoid overflow
     if (this.sampleCounter > 1000000) {
       this.sampleCounter = 0;
@@ -324,11 +333,11 @@ export class TrajectoryHookHandler {
   // ============================================================================
 
   /**
-   * Handle llm_input hook — capture prompt/context before LLM call.
-   * 
+   * Handle llm_input hook - capture prompt/context before LLM call.
+   *
    * SDK Signature: (event: PluginHookLlmInputEvent, ctx: PluginHookAgentContext) => Promise<void> | void
    * Source: PluginHookHandlerMap['llm_input'] per SDK types.d.ts
-   * 
+   *
    * FIX 6: Sampling decision is made ONCE here and stored in the turn state.
    */
   async onLlmInput(
@@ -337,7 +346,7 @@ export class TrajectoryHookHandler {
   ): Promise<void> {
     // FIX 6: Make sampling decision ONCE at turn start
     const sampled = this.shouldSample();
-    
+
     // If not sampling, we still track the turn but mark it as not to be persisted
     // This allows subsequent events to check the stored decision
     if (!sampled && !this.config.trajectory.enabled) {
@@ -363,20 +372,23 @@ export class TrajectoryHookHandler {
       episode.turnCount++;
 
       const turnId = generateId("turn");
-      
+
       // CHUNK B: Detect skills from system prompt using SkillRegistry
       // This captures which SKILL.md files were injected into the context
       const systemPromptText = event.systemPrompt ?? '';
       const skillsFromSystemPrompt = getSkillRegistry().matchSkillsInText(systemPromptText);
-      
+
       // Also extract skills from user prompt as fallback
       const skillsFromPrompt = extractSkillsFromText(event.prompt);
-      
+
       // Combine and deduplicate skills
       const allSkillsUsed = [...new Set([...skillsFromSystemPrompt, ...skillsFromPrompt])];
-      
+
+      // Filter out tool names that are not real skills
+      const filteredSkillsUsed = allSkillsUsed.filter(s => !TOOL_NAME_DENYLIST.has(s.toLowerCase()));
+
       // Update episode skills
-      allSkillsUsed.forEach(skill => episode.skillsInvolved.add(skill));
+      filteredSkillsUsed.forEach(skill => episode.skillsInvolved.add(skill));
 
       const turn: TurnBufferEntry = {
         id: turnId,
@@ -401,8 +413,8 @@ export class TrajectoryHookHandler {
         outcome_type: "partial", // Will be updated on llm_output or agent_end
         outcome_json: safeJsonStringify({ status: "pending" }),
         reward_signal: undefined,
-        skills_used: JSON.stringify(allSkillsUsed.map(s => s.toLowerCase())),
-        target_skill: allSkillsUsed[0]?.toLowerCase(), // First detected skill from system prompt or prompt (normalized to lowercase)
+        skills_used: JSON.stringify(filteredSkillsUsed.map(s => s.toLowerCase())),
+        target_skill: filteredSkillsUsed[0]?.toLowerCase(), // First detected skill from system prompt or prompt (normalized to lowercase)
         _internal: {
           createdAt: Date.now(),
           sessionId,
@@ -414,14 +426,14 @@ export class TrajectoryHookHandler {
       this.turnBuffer.set(turnId, turn);
       episode.turnIds.push(turnId);
     } catch (error) {
-      // Graceful error handling — never crash the agent turn
+      // Graceful error handling - never crash the agent turn
       console.error("[self-evolution] Error in onLlmInput:", error);
     }
   }
 
   /**
-   * Handle llm_output hook — capture response after LLM call.
-   * 
+   * Handle llm_output hook - capture response after LLM call.
+   *
    * SDK Signature: (event: PluginHookLlmOutputEvent, ctx: PluginHookAgentContext) => Promise<void> | void
    * Source: PluginHookHandlerMap['llm_output'] per SDK types.d.ts
    */
@@ -457,12 +469,12 @@ export class TrajectoryHookHandler {
         usage: event.usage,
       });
 
-      // Don't set reward_signal here — OutcomeLabeler will set it via LLM-as-judge
+      // Don't set reward_signal here - OutcomeLabeler will set it via LLM-as-judge
       // The reward_signal column is nullable; leaving it null lets the labeler determine
       // the actual outcome quality rather than using a misleading token-efficiency heuristic.
 
       // If the output suggests a tool call, update action type
-      const hasToolCall = event.assistantTexts.some(text => 
+      const hasToolCall = event.assistantTexts.some(text =>
         text.includes("<tool>") || text.includes("<function>") || text.includes('"tool"')
       );
       if (hasToolCall) {
@@ -474,8 +486,8 @@ export class TrajectoryHookHandler {
   }
 
   /**
-   * Handle agent_end hook — capture turn outcome.
-   * 
+   * Handle agent_end hook - capture turn outcome.
+   *
    * SDK Signature: (event: PluginHookAgentEndEvent, ctx: PluginHookAgentContext) => Promise<void> | void
    * Source: PluginHookHandlerMap['agent_end'] per SDK types.d.ts
    */
@@ -526,11 +538,11 @@ export class TrajectoryHookHandler {
   }
 
   /**
-   * Handle before_tool_call hook — capture tool invocation intent.
-   * 
+   * Handle before_tool_call hook - capture tool invocation intent.
+   *
    * SDK Signature: (event: PluginHookBeforeToolCallEvent, ctx: PluginHookToolContext) => Promise<PluginHookBeforeToolCallResult | void> | PluginHookBeforeToolCallResult | void
    * Source: PluginHookHandlerMap['before_tool_call'] per SDK types.d.ts
-   * 
+   *
    * Returns PluginHookBeforeToolCallResult to allow blocking/approval, or void to proceed.
    */
   async onBeforeToolCall(
@@ -542,7 +554,7 @@ export class TrajectoryHookHandler {
     const runId = ctx.runId;
     // FIX: Use tri-state (boolean | undefined) to distinguish "not found" from "found but false"
     let sampled: boolean | undefined = undefined;
-    
+
     if (sessionKey && runId) {
       const episodeId = this.sessionEpisodeMap.get(sessionKey);
       if (episodeId) {
@@ -560,12 +572,12 @@ export class TrajectoryHookHandler {
         }
       }
     }
-    
+
     // Only make new decision if truly no parent found (sampled === undefined)
     if (sampled === undefined) {
       sampled = this.shouldSample();
     }
-    
+
     if (!sampled) return;
 
     try {
@@ -584,12 +596,12 @@ export class TrajectoryHookHandler {
       episode.turnCount++;
 
       const turnId = generateId("turn");
-      
+
       // CHUNK B: Determine target_skill for tool calls
       // 1. If this is a skill tool (skill_view, skill_manage, etc.), extract skill from params
       // 2. Otherwise, inherit from parent turn's target_skill if available
       let targetSkill: string | undefined = extractSkillFromToolParams(event.toolName, event.params);
-      
+
       // If not a skill tool, try to inherit from parent turn
       if (!targetSkill && sessionKey && runId) {
         for (let i = episode.turnIds.length - 1; i >= 0; i--) {
@@ -601,7 +613,7 @@ export class TrajectoryHookHandler {
           }
         }
       }
-      
+
       // Build skills_used: combine detected skills from params with target skill
       const skillsFromParams = extractSkillsFromParams(event.params);
       const allSkillsUsed = [...new Set([...(targetSkill ? [targetSkill] : []), ...skillsFromParams])];
@@ -647,8 +659,8 @@ export class TrajectoryHookHandler {
   }
 
   /**
-   * Handle after_tool_call hook — capture tool result.
-   * 
+   * Handle after_tool_call hook - capture tool result.
+   *
    * SDK Signature: (event: PluginHookAfterToolCallEvent, ctx: PluginHookToolContext) => Promise<void> | void
    * Source: PluginHookHandlerMap['after_tool_call'] per SDK types.d.ts
    */
@@ -684,7 +696,7 @@ export class TrajectoryHookHandler {
           : turn.outcome_type === "partial";
 
         if (matched) {
-          
+
           // FIX 6: Check stored sampling decision
           if (!turn._internal._sampled) {
             // Not sampled - remove from buffer without finalizing
@@ -720,8 +732,8 @@ export class TrajectoryHookHandler {
   }
 
   /**
-   * Handle session_start hook — start a new episode record.
-   * 
+   * Handle session_start hook - start a new episode record.
+   *
    * SDK Signature: (event: PluginHookSessionStartEvent, ctx: PluginHookSessionContext) => Promise<void> | void
    * Source: PluginHookHandlerMap['session_start'] per SDK types.d.ts
    */
@@ -756,8 +768,8 @@ export class TrajectoryHookHandler {
   }
 
   /**
-   * Handle session_end hook — close episode, compute summary.
-   * 
+   * Handle session_end hook - close episode, compute summary.
+   *
    * SDK Signature: (event: PluginHookSessionEndEvent, ctx: PluginHookSessionContext) => Promise<void> | void
    * Source: PluginHookHandlerMap['session_end'] per SDK types.d.ts
    */
@@ -812,8 +824,8 @@ export class TrajectoryHookHandler {
   }
 
   /**
-   * Handle subagent_spawned hook — note subagent delegation.
-   * 
+   * Handle subagent_spawned hook - note subagent delegation.
+   *
    * SDK Signature: (event: PluginHookSubagentSpawnedEvent, ctx: PluginHookSubagentContext) => Promise<void> | void
    * Source: PluginHookHandlerMap['subagent_spawned'] per SDK types.d.ts
    */
@@ -826,7 +838,7 @@ export class TrajectoryHookHandler {
     const parentSessionKey = ctx.requesterSessionKey;
     const runId = ctx.runId;
     let sampled = false;
-    
+
     if (parentSessionKey && runId) {
       const parentEpisodeId = this.sessionEpisodeMap.get(parentSessionKey);
       if (parentEpisodeId) {
@@ -844,12 +856,12 @@ export class TrajectoryHookHandler {
         }
       }
     }
-    
+
     // If no parent turn found, make a new sampling decision
     if (!sampled) {
       sampled = this.shouldSample();
     }
-    
+
     if (!sampled) return;
 
     try {
@@ -889,7 +901,7 @@ export class TrajectoryHookHandler {
             outcome_json: safeJsonStringify({ status: "spawned" }),
             reward_signal: undefined,
             skills_used: JSON.stringify(["subagent"]),
-            target_skill: event.agentId?.toLowerCase(),
+            target_skill: undefined,
             _internal: {
               createdAt: Date.now(),
               sessionId: parentSessionKey!,
@@ -908,8 +920,8 @@ export class TrajectoryHookHandler {
   }
 
   /**
-   * Handle subagent_ended hook — capture subagent outcome.
-   * 
+   * Handle subagent_ended hook - capture subagent outcome.
+   *
    * SDK Signature: (event: PluginHookSubagentEndedEvent, ctx: PluginHookSubagentContext) => Promise<void> | void
    * Source: PluginHookHandlerMap['subagent_ended'] per SDK types.d.ts
    */
@@ -980,7 +992,7 @@ export class TrajectoryHookHandler {
    */
   private getOrCreateEpisode(sessionKey: string, ctx: AgentContext): string | null {
     let episodeId = this.sessionEpisodeMap.get(sessionKey);
-    
+
     if (!episodeId) {
       episodeId = generateId("episode");
       const episode: ActiveEpisode = {

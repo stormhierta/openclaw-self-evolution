@@ -255,24 +255,32 @@ export class SkillRegistry {
     const lowerText = text.toLowerCase();
 
     for (const entry of this.byId.values()) {
-      if (lowerText.includes(entry.id.toLowerCase())) {
+      const skillIdPattern = new RegExp(`\\b${entry.id.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+      if (skillIdPattern.test(lowerText)) {
         matchedIds.add(entry.id);
         continue;
       }
 
-      if (entry.name && lowerText.includes(entry.name.toLowerCase())) {
-        matchedIds.add(entry.id);
-        continue;
-      }
-
-      for (const trigger of entry.triggerPhrases) {
-        if (trigger && lowerText.includes(trigger.toLowerCase())) {
+      if (entry.name) {
+        const namePattern = new RegExp(`\\b${entry.name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+        if (namePattern.test(lowerText)) {
           matchedIds.add(entry.id);
-          break;
+          continue;
         }
       }
 
-      if (lowerText.includes(entry.path.toLowerCase())) {
+      for (const trigger of entry.triggerPhrases) {
+        if (trigger) {
+          const triggerPattern = new RegExp(`\\b${trigger.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+          if (triggerPattern.test(lowerText)) {
+            matchedIds.add(entry.id);
+            break;
+          }
+        }
+      }
+
+      const pathPattern = new RegExp(`\\b${entry.path.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+      if (pathPattern.test(lowerText)) {
         matchedIds.add(entry.id);
         continue;
       }
