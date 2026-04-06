@@ -34,6 +34,7 @@ import type {
 import type { GEPAEvolver, EvolutionResult } from "./gepa/evolver.js";
 import type { DatasetManager } from "../dataset/manager.js";
 import type { DatasetBuilder } from "../dataset/builder.js";
+import { SyntheticGenerator } from "../dataset/synthetic-generator.js";
 
 // ============================================================================
 // OptimizeOptions
@@ -197,9 +198,26 @@ export class EvolutionOptimizer {
       }
 
       // Step 3: Load test cases from dataset
-      const testCases = await this.datasetManager.getEntries(datasetId);
+      let testCases = await this.datasetManager.getEntries(datasetId);
       if (testCases.length === 0) {
-        throw new Error(`Dataset ${datasetId} has no entries`);
+        // No real trajectory data — generate synthetic test cases from skill content
+        console.warn(`[optimizer] No real trajectory data for skill "${skillName}" — using synthetic dataset`);
+        const skillContent = this.readSkillContent(skillPath);
+        const skillDescription = this.extractSkillDescription(skillContent);
+        const syntheticGen = new SyntheticGenerator(this.config);
+        const synthetic = await syntheticGen.generateForSkill(skillName, skillDescription, 5);
+        testCases = synthetic;
+
+        // If synthetic generation also fails, skip gracefully
+        if (testCases.length === 0) {
+          console.warn(`[optimizer] Synthetic generation also produced 0 cases — skipping evolution for "${skillName}"`);
+          await this.updateRunStatus(runId, "failed", "No trajectory data and synthetic generation failed");
+          const run = await this.getRunStatus(runId);
+          if (!run) {
+            throw new Error(`Failed to retrieve evolution run ${runId} after status update`);
+          }
+          return run;
+        }
       }
 
       // Step 4: Read current skill content
@@ -436,6 +454,34 @@ export class EvolutionOptimizer {
   // ==========================================================================
   // Private Methods
   // ==========================================================================
+
+  /**
+   * Update the status of an evolution run.
+   *
+   * @param runId - The evolution run ID
+   * @param status - The new status
+   * @param errorMessage - Optional error message
+   */
+  private async updateRunStatus(
+    runId: string,
+    status: EvolutionStatus,
+    errorMessage?: string
+  ): Promise<void> {
+    await this.initialize();
+    if (!this.db) {
+      throw new Error("Database not initialized");
+    }
+
+    const completedAt = status === "failed" || status === "completed" ? new Date().toISOString() : undefined;
+
+    this.db
+      .prepare(
+        `UPDATE evolution_runs
+         SET status = ?, completed_at = ?, error_message = ?
+         WHERE id = ?`
+      )
+      .run(status, completedAt ?? null, errorMessage ?? null, runId);
+  }
 
   /**
    * Get the database path for evolution runs.
