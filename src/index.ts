@@ -39,6 +39,7 @@ import { TrajectoryLogger } from "./collection/trajectory-logger.js";
 import { EvolutionTrigger } from "./automation/evolution-trigger.js";
 import { EvolutionScheduler } from "./automation/scheduler.js";
 import { SessionMiner } from "./collection/session-miner.js";
+import { SkillRegistry, getSkillRegistry } from "./collection/skill-registry.js";
 import { RubricRegistry } from "./evolution/fitness/rubrics.js";
 import { skillManagerTool } from "./tools/skill-manager-schema.js";
 import { LlmJudge } from "./evolution/fitness/llm-judge.js";
@@ -79,6 +80,8 @@ let reviewQueue: ReviewQueue | null = null;
 let evolutionTrigger: EvolutionTrigger | null = null;
 // P3-C: Evolution scheduler for automated background evolution
 let evolutionScheduler: EvolutionScheduler | null = null;
+// SkillRegistry: Runtime index of all known skills
+let skillRegistry: SkillRegistry | null = null;
 
 /**
  * Get the plugin configuration (for internal use)
@@ -120,6 +123,13 @@ export function getEvolutionTrigger(): EvolutionTrigger | null {
  */
 export function getScheduler(): EvolutionScheduler | null {
   return evolutionScheduler;
+}
+
+/**
+ * Get the skill registry instance (for testing/internal use)
+ */
+export function getSkillRegistryInstance(): SkillRegistry | null {
+  return skillRegistry;
 }
 
 
@@ -1387,6 +1397,11 @@ async function register(api: OpenClawPluginApi): Promise<void> {
   // P3-A: Initialize evolution trigger for self-triggered evolution
   evolutionTrigger = new EvolutionTrigger(pluginConfig);
   logger.info("[self-evolution] Evolution trigger initialized for self-triggered evolution");
+
+  // Initialize SkillRegistry for runtime skill discovery
+  skillRegistry = new SkillRegistry();
+  skillRegistry.scan();
+  logger.info(`[self-evolution] SkillRegistry initialized with ${skillRegistry.getAllSkills().length} skills`);
 
   // P3-C: Initialize and start evolution scheduler for automated background evolution
   // Only start if autoRun is explicitly true in config (default is false)

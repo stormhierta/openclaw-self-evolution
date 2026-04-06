@@ -15,3 +15,5 @@ export type {
   SkillCandidate,
   InvocationPattern,
 } from "./skill-usage-analyzer.js";
+export { SkillRegistry, getSkillRegistry, resetSkillRegistry } from "./skill-registry.js";
+export type { SkillEntry } from "./skill-registry.js";
