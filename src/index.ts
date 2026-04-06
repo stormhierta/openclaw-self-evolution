@@ -65,11 +65,11 @@ export const VERSION = "0.1.0";
 // Store config for use across the plugin
 let pluginConfig: EvolutionConfig;
 
-// Trajectory hook handler instance
+// Trajectory hook handler instance (singleton - initialized once)
 let trajectoryHandler: TrajectoryHookHandler | null = null;
-// FIX 4: Trajectory logger instance for persisting trajectory data
+// FIX 4: Trajectory logger instance for persisting trajectory data (singleton)
 let trajectoryLogger: TrajectoryLogger | null = null;
-// P3-B: Outcome labeler for RL trajectory labeling
+// P3-B: Outcome labeler for RL trajectory labeling (singleton)
 let outcomeLabeler: OutcomeLabeler | null = null;
 // FIX 4: Shared DatasetManager instance (initialized once in register)
 let datasetManager: DatasetManager | null = null;
@@ -82,6 +82,9 @@ let evolutionTrigger: EvolutionTrigger | null = null;
 let evolutionScheduler: EvolutionScheduler | null = null;
 // SkillRegistry: Runtime index of all known skills
 let skillRegistry: SkillRegistry | null = null;
+
+// Guard to prevent duplicate hook registration if register() is called twice
+let hooksRegistered = false;
 
 /**
  * Get the plugin configuration (for internal use)
@@ -1381,12 +1384,18 @@ async function register(api: OpenClawPluginApi): Promise<void> {
     return;
   }
 
-  // FIX 4: Initialize trajectory handler and logger
-  trajectoryHandler = new TrajectoryHookHandler(pluginConfig);
-  trajectoryLogger = new TrajectoryLogger(pluginConfig, trajectoryHandler);
+  // FIX 4: Initialize trajectory handler and logger (singleton pattern - only create if not exists)
+  if (!trajectoryHandler) {
+    trajectoryHandler = new TrajectoryHookHandler(pluginConfig);
+  }
+  if (!trajectoryLogger) {
+    trajectoryLogger = new TrajectoryLogger(pluginConfig, trajectoryHandler);
+  }
 
-  // P3-B: Initialize outcome labeler for RL trajectory labeling
-  outcomeLabeler = new OutcomeLabeler(pluginConfig);
+  // P3-B: Initialize outcome labeler for RL trajectory labeling (singleton pattern)
+  if (!outcomeLabeler) {
+    outcomeLabeler = new OutcomeLabeler(pluginConfig);
+  }
 
   // FIX 4: Initialize shared DatasetManager once (reused across all tool calls)
   datasetManager = new DatasetManager(pluginConfig);
@@ -1435,7 +1444,8 @@ async function register(api: OpenClawPluginApi): Promise<void> {
   }
 
   // Register trajectory hooks
-  if (pluginConfig.trajectory.enabled) {
+  if (pluginConfig.trajectory.enabled && !hooksRegistered) {
+    hooksRegistered = true;
     logger.info("[self-evolution] Registering trajectory hooks");
     
     api.on("llm_input", handleLlmInput);

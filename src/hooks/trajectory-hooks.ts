@@ -400,8 +400,8 @@ export class TrajectoryHookHandler {
         outcome_type: "partial", // Will be updated on llm_output or agent_end
         outcome_json: safeJsonStringify({ status: "pending" }),
         reward_signal: undefined,
-        skills_used: JSON.stringify(allSkillsUsed),
-        target_skill: allSkillsUsed[0], // First detected skill from system prompt or prompt
+        skills_used: JSON.stringify(allSkillsUsed.map(s => s.toLowerCase())),
+        target_skill: allSkillsUsed[0]?.toLowerCase(), // First detected skill from system prompt or prompt (normalized to lowercase)
         _internal: {
           createdAt: Date.now(),
           sessionId,
@@ -609,6 +609,9 @@ export class TrajectoryHookHandler {
       const allSkillsUsed = [...new Set([...(targetSkill ? [targetSkill] : []), ...skillsFromParams])];
       allSkillsUsed.forEach(skill => episode.skillsInvolved.add(skill));
 
+      // Normalize target_skill to lowercase for consistent DB queries
+      const normalizedTargetSkill = targetSkill?.toLowerCase();
+
       const turn: TurnBufferEntry = {
         id: turnId,
         session_key: sessionKey,
@@ -627,8 +630,8 @@ export class TrajectoryHookHandler {
         outcome_type: "partial",
         outcome_json: safeJsonStringify({ status: "pending" }),
         reward_signal: undefined,
-        skills_used: JSON.stringify(allSkillsUsed),
-        target_skill: targetSkill,
+        skills_used: JSON.stringify(allSkillsUsed.map(s => s.toLowerCase())),
+        target_skill: normalizedTargetSkill,
         _internal: {
           createdAt: Date.now(),
           sessionId: ctx.sessionId ?? sessionKey,
