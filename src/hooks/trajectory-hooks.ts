@@ -193,6 +193,7 @@ interface TurnBufferEntry extends TurnRecordRow {
     createdAt: number;
     sessionId: string;
     runId?: string;
+    toolCallId?: string;
     /** FIX 6: Store sampling decision once per turn at onLlmInput time */
     _sampled: boolean;
   };
@@ -456,13 +457,9 @@ export class TrajectoryHookHandler {
         usage: event.usage,
       });
 
-      // Calculate a simple reward signal based on usage efficiency
-      if (event.usage) {
-        const totalTokens = (event.usage.input ?? 0) + (event.usage.output ?? 0);
-        // Simple heuristic: reward efficient responses
-        turn.reward_signal = Math.max(0, 1 - (totalTokens / 10000));
-        episode.totalReward += turn.reward_signal;
-      }
+      // Don't set reward_signal here — OutcomeLabeler will set it via LLM-as-judge
+      // The reward_signal column is nullable; leaving it null lets the labeler determine
+      // the actual outcome quality rather than using a misleading token-efficiency heuristic.
 
       // If the output suggests a tool call, update action type
       const hasToolCall = event.assistantTexts.some(text => 
@@ -543,7 +540,8 @@ export class TrajectoryHookHandler {
     // FIX 6: Check if there's an existing in-progress turn for this run
     const sessionKey = ctx.sessionKey ?? ctx.sessionId;
     const runId = ctx.runId;
-    let sampled = false;
+    // FIX: Use tri-state (boolean | undefined) to distinguish "not found" from "found but false"
+    let sampled: boolean | undefined = undefined;
     
     if (sessionKey && runId) {
       const episodeId = this.sessionEpisodeMap.get(sessionKey);
@@ -563,8 +561,8 @@ export class TrajectoryHookHandler {
       }
     }
     
-    // If no parent turn found, make a new sampling decision
-    if (!sampled) {
+    // Only make new decision if truly no parent found (sampled === undefined)
+    if (sampled === undefined) {
       sampled = this.shouldSample();
     }
     
@@ -636,6 +634,7 @@ export class TrajectoryHookHandler {
           createdAt: Date.now(),
           sessionId: ctx.sessionId ?? sessionKey,
           runId,
+          toolCallId: event.toolCallId,
           _sampled: sampled, // FIX 6: Store sampling decision
         },
       };
@@ -670,14 +669,14 @@ export class TrajectoryHookHandler {
       const episode = this.activeEpisodes.get(episodeId);
       if (!episode || episode.turnIds.length === 0) return;
 
-      // Find the matching turn (most recent with same tool name and runId)
+      // Find the matching turn (most recent with same toolCallId and runId)
       for (let i = episode.turnIds.length - 1; i >= 0; i--) {
         const turnId = episode.turnIds[i];
         const turn = this.turnBuffer.get(turnId);
 
-        if (turn && 
-            turn._internal.runId === runId && 
-            turn.target_skill === event.toolName &&
+        if (turn &&
+            turn._internal.runId === runId &&
+            turn._internal.toolCallId === event.toolCallId &&
             turn.outcome_type === "partial") {
           
           // FIX 6: Check stored sampling decision
